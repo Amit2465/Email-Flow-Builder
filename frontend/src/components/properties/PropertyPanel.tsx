@@ -350,7 +350,6 @@ export const PropertyPanel: React.FC = () => {
                   <p className="text-sm text-purple-800 font-medium">Branching Logic</p>
                   <p className="text-xs text-purple-600 mt-1">
                     Connect the "Yes" output to the path for users who meet the condition, and "No" for those who don't.
-                    Use an Empty node if you don't need one of the paths.
                   </p>
                 </div>
               </div>
@@ -358,23 +357,7 @@ export const PropertyPanel: React.FC = () => {
           </div>
         )
 
-      case "empty":
-        return (
-          <div className="space-y-4">
-            <div className="p-3 bg-gray-50 rounded-lg">
-              <div className="flex items-start space-x-2">
-                <Info className="w-4 h-4 text-gray-600 mt-0.5" />
-                <div>
-                  <p className="text-sm text-gray-800 font-medium">Empty Node</p>
-                  <p className="text-xs text-gray-600 mt-1">
-                    This is a placeholder node that performs no action. It's useful for connecting flows when you don't
-                    need a specific action, such as the unused branch of a condition.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        )
+
 
       case "end":
         return (

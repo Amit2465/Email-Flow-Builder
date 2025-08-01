@@ -25,14 +25,7 @@ export const nodeTemplates: NodeTemplate[] = [
     color: "#8B5CF6",
     category: "logic",
   },
-  {
-    type: "empty",
-    label: "Empty",
-    description: "Placeholder node with no action",
-    icon: "⚪",
-    color: "#6B7280",
-    category: "logic",
-  },
+
   {
     type: "end",
     label: "End",

@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { ChevronLeft, ChevronRight, Mail, Clock, HelpCircle, Circle, Square } from "lucide-react"
+import { ChevronLeft, ChevronRight, Mail, Clock, HelpCircle, Square } from "lucide-react"
 import { nodeTemplates } from "../../data/nodeTemplates"
 
 interface NodePaletteProps {
@@ -53,8 +53,7 @@ export const NodePalette: React.FC<NodePaletteProps> = ({ isCollapsed, onToggleC
                         ? "bg-yellow-50 border-yellow-200 text-yellow-700 hover:bg-yellow-100"
                         : template.type === "condition"
                           ? "bg-purple-50 border-purple-200 text-purple-700 hover:bg-purple-100"
-                          : template.type === "empty"
-                            ? "bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100"
+                          
                             : "bg-red-50 border-red-200 text-red-700 hover:bg-red-100"
                   }`}
                 >
@@ -63,7 +62,7 @@ export const NodePalette: React.FC<NodePaletteProps> = ({ isCollapsed, onToggleC
                       {template.type === "sendEmail" && <Mail className="w-4 h-4" />}
                       {template.type === "wait" && <Clock className="w-4 h-4" />}
                       {template.type === "condition" && <HelpCircle className="w-4 h-4" />}
-                      {template.type === "empty" && <Circle className="w-4 h-4" />}
+
                       {template.type === "end" && <Square className="w-4 h-4" />}
                     </div>
                     <div className="flex-1 min-w-0">
@@ -95,8 +94,7 @@ export const NodePalette: React.FC<NodePaletteProps> = ({ isCollapsed, onToggleC
                     ? "bg-yellow-50 border-yellow-300 hover:bg-yellow-100 hover:border-yellow-400"
                     : template.type === "condition"
                       ? "bg-purple-50 border-purple-300 hover:bg-purple-100 hover:border-purple-400"
-                      : template.type === "empty"
-                        ? "bg-gray-50 border-gray-300 hover:bg-gray-100 hover:border-gray-400"
+
                         : "bg-red-50 border-red-300 hover:bg-red-100 hover:border-red-400"
               }`}
               title={template.label}
@@ -104,7 +102,7 @@ export const NodePalette: React.FC<NodePaletteProps> = ({ isCollapsed, onToggleC
               {template.type === "sendEmail" && <Mail className="w-4 h-4 text-blue-600" />}
               {template.type === "wait" && <Clock className="w-4 h-4 text-yellow-600" />}
               {template.type === "condition" && <HelpCircle className="w-4 h-4 text-purple-600" />}
-              {template.type === "empty" && <Circle className="w-4 h-4 text-gray-600" />}
+
               {template.type === "end" && <Square className="w-4 h-4 text-red-600" />}
             </div>
           ))}

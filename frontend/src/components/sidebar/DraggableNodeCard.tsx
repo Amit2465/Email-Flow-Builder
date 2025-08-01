@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { Mail, Clock, HelpCircle, Square, Circle } from "lucide-react"
+import { Mail, Clock, HelpCircle, Square } from "lucide-react"
 import type { NodeTemplate } from "../../types/flow"
 
 interface DraggableNodeCardProps {
@@ -24,8 +24,7 @@ export const DraggableNodeCard: React.FC<DraggableNodeCardProps> = ({ template }
         return <HelpCircle className="w-4 h-4" />
       case "end":
         return <Square className="w-4 h-4" />
-      case "empty":
-        return <Circle className="w-4 h-4" />
+
       default:
         return <Mail className="w-4 h-4" />
     }

@@ -1,6 +1,6 @@
 export interface FlowNode {
   id: string
-  type: "sendEmail" | "wait" | "condition" | "start" | "end" | "empty"
+  type: "sendEmail" | "wait" | "condition" | "start" | "end"
   position: { x: number; y: number }
   data: {
     label: string
@@ -46,7 +46,7 @@ export interface CampaignFlow {
 }
 
 export interface NodeTemplate {
-  type: "sendEmail" | "wait" | "condition" | "end" | "empty"
+  type: "sendEmail" | "wait" | "condition" | "end"
   label: string
   description: string
   icon: string

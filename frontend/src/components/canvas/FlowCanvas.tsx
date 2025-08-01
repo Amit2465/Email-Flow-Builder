@@ -10,7 +10,6 @@ import { SendEmailNode } from "../nodes/SendEmailNode"
 import { WaitNode } from "../nodes/WaitNode"
 import { ConditionNode } from "../nodes/ConditionNode"
 import { EndNode } from "../nodes/EndNode"
-import { EmptyNode } from "../nodes/EmptyNode"
 
 const nodeTypes = {
   start: StartNode,
@@ -18,7 +17,6 @@ const nodeTypes = {
   wait: WaitNode,
   condition: ConditionNode,
   end: EndNode,
-  empty: EmptyNode,
 }
 
 const FlowCanvasInner: React.FC = () => {
@@ -97,8 +95,6 @@ const FlowCanvasInner: React.FC = () => {
         return "Condition Check"
       case "end":
         return "Campaign End"
-      case "empty":
-        return "Empty"
       default:
         return type
     }
@@ -113,8 +109,6 @@ const FlowCanvasInner: React.FC = () => {
       case "condition":
         return { conditionType: "open" }
       case "end":
-        return {}
-      case "empty":
         return {}
       default:
         return {}
