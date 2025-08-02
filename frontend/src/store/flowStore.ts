@@ -2,6 +2,8 @@ import { create } from "zustand"
 import type { FlowNode, CampaignFlow } from "../types/flow"
 import { type Node, type Edge, addEdge, applyNodeChanges, applyEdgeChanges, type Connection } from "@xyflow/react"
 
+
+
 interface FlowStore {
   nodes: Node[]
   edges: Edge[]
@@ -28,6 +30,9 @@ interface FlowStore {
   importFlow: (flow: CampaignFlow) => void
   resetFlow: () => void
   setContactFile: (file: File | null) => void
+  
+  // Campaign save API
+  saveCampaign: () => Promise<any>
 }
 
 export const useFlowStore = create<FlowStore>((set, get) => ({
@@ -287,5 +292,81 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       })
     }
     get().validateFlow()
+  },
+
+
+
+  // Campaign save API
+  saveCampaign: async () => {
+    try {
+      const flowData = get().exportFlow()
+      const { contactFile } = get()
+      
+      // Read contact file content if available
+      let contactFileContent = null
+      if (contactFile) {
+        contactFileContent = await contactFile.text()
+      }
+      
+      const campaignData = {
+        campaign: {
+          id: `campaign_${Date.now()}`,
+          name: "Email Campaign Flow",
+          created_at: new Date().toISOString(),
+          status: "ready",
+        },
+        nodes: flowData.nodes.map((node) => ({
+          id: node.id,
+          type: node.type,
+          position: node.position,
+          configuration: {
+            label: node.data.label,
+            ...node.data.config,
+          },
+        })),
+        connections: flowData.edges.map((edge) => ({
+          id: edge.id,
+          from_node: edge.source,
+          to_node: edge.target,
+          connection_type: edge.sourceHandle || "default",
+          animated: edge.animated || false,
+        })),
+        workflow: {
+          start_node: "start-1",
+          total_nodes: flowData.nodes.length,
+          total_connections: flowData.edges.length,
+        },
+        contact_file: contactFile
+          ? {
+              filename: contactFile.name,
+              size: contactFile.size,
+              type: contactFile.type,
+              content: contactFileContent,
+              uploaded_at: new Date(contactFile.lastModified).toISOString(),
+            }
+          : null,
+      }
+
+      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/campaigns`
+      
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(campaignData),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.detail || 'Failed to save campaign')
+      }
+
+      const result = await response.json()
+      return result
+    } catch (error) {
+      console.error('Error saving campaign:', error)
+      throw error
+    }
   },
 }))

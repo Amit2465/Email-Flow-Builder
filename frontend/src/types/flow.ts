@@ -12,8 +12,7 @@ export interface FlowNode {
       waitDays?: number
       waitDuration?: number
       waitUnit?: string
-      conditionType?: "open" | "click" | "purchase"
-      conditionValue?: string
+      conditionType?: "open"
       contactFile?: {
         name: string
         size: number

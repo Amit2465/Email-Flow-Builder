@@ -97,25 +97,65 @@ export const TopBar: React.FC = () => {
   }
 
   const handleRunFlow = async () => {
+    console.log('=== TOPBAR: handleRunFlow called ===')
+    console.log('Contact file exists:', !!contactFile)
+    console.log('Flow is valid:', isValidFlow)
+    console.log('Validation errors:', validationErrors)
+    
+    // Test backend connection first
+    try {
+      console.log('=== TOPBAR: Testing backend connection ===')
+      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}`
+      console.log('Testing connection to:', apiUrl)
+      
+      const testResponse = await fetch(`${apiUrl}/test-cors`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      })
+      
+      console.log('Test response status:', testResponse.status)
+      console.log('Test response ok:', testResponse.ok)
+      
+      if (testResponse.ok) {
+        const testResult = await testResponse.json()
+        console.log('Test response data:', testResult)
+      } else {
+        console.error('Backend connection test failed')
+      }
+    } catch (error) {
+      console.error('Error testing backend connection:', error)
+    }
+    
     if (!contactFile) {
+      console.log('=== TOPBAR: No contact file, showing error ===')
       setToastErrors(["Please upload a contact file before running the campaign!"])
       setShowErrorToast(true)
       return
     }
 
     if (!isValidFlow) {
+      console.log('=== TOPBAR: Flow is invalid, showing errors ===')
       setToastErrors(validationErrors)
       setShowErrorToast(true)
       return
     }
 
     try {
+      console.log('=== TOPBAR: Starting campaign save process ===')
+      
       // Read and parse CSV file
+      console.log('=== TOPBAR: Reading contact file ===')
       const fileText = await contactFile.text()
+      console.log('File text length:', fileText.length)
       const contactData = parseCSVData(fileText)
+      console.log('Parsed contact data:', contactData)
 
       // Convert flow to JSON
+      console.log('=== TOPBAR: Converting flow to JSON ===')
       const flowJSON = convertFlowToJSON()
+      console.log('Flow JSON:', flowJSON)
 
       // Print to console with clear separators
       console.log("=".repeat(50))
@@ -129,13 +169,25 @@ export const TopBar: React.FC = () => {
       console.log(JSON.stringify(flowJSON, null, 2))
       console.log("=".repeat(50))
 
-      // Show success message
+      // Call the campaign API to save the campaign (execution starts automatically)
+      console.log('=== TOPBAR: Calling saveCampaign ===')
+      const { saveCampaign } = useFlowStore.getState()
+      const result = await saveCampaign()
+      
+      console.log('=== TOPBAR: Campaign save completed ===')
+      console.log("\n" + "=".repeat(50))
+      console.log("=== CAMPAIGN API RESPONSE ===")
+      console.log("=".repeat(50))
+      console.log(JSON.stringify(result, null, 2))
+      console.log("=".repeat(50))
+
+      // Show success message (execution started automatically)
       alert(
-        `Campaign flow started successfully!\n\nContacts loaded: ${contactData.name.length}\nValid emails: ${contactData.email.filter((e) => e !== "").length}\nFlow nodes: ${flowJSON.nodes.length}\n\nCheck console for detailed JSON data.`,
+        `Campaign created and started successfully!\n\nCampaign ID: ${result.campaign_id}\nContacts loaded: ${contactData.name.length}\nValid emails: ${contactData.email.filter((e) => e !== "").length}\nFlow nodes: ${flowJSON.nodes.length}\n\nCampaign is now running and sending emails!`,
       )
     } catch (error) {
-      console.error("Error processing files:", error)
-      setToastErrors(["Error reading contact file. Please ensure it's a valid CSV file."])
+      console.error("Error saving campaign:", error)
+      setToastErrors(["Error saving campaign. Please try again."])
       setShowErrorToast(true)
     }
   }

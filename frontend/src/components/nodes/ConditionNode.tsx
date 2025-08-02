@@ -13,8 +13,6 @@ export const ConditionNode: React.FC<any> = ({ id, data, selected }) => {
 
   const conditionOptions = [
     { value: "open", label: "Email Opened" },
-    { value: "click", label: "Link Clicked" },
-    { value: "purchase", label: "Purchase Made" },
   ]
 
   const handleSave = () => {

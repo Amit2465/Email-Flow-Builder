@@ -8,8 +8,7 @@ export interface FlowNode {
     config?: {
       templateId?: string;
       waitDays?: number;
-      conditionType?: 'open' | 'click' | 'purchase';
-      conditionValue?: string;
+      conditionType?: "open"
     };
   };
 }

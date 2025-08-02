@@ -94,8 +94,6 @@ export const PropertyPanel: React.FC = () => {
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-purple-500"
               >
                 <option value="open">Email Opened</option>
-                <option value="click">Link Clicked</option>
-                <option value="purchase">Purchase Made</option>
               </select>
             </div>
             <div className="p-3 bg-purple-50 rounded-lg">
