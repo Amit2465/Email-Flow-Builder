@@ -347,7 +347,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
           : null,
       }
 
-      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/campaigns`
+      // Hardcode the API URL for simplicity
+      const apiUrl = 'http://localhost:8000/api/campaigns';
       
       const response = await fetch(apiUrl, {
         method: 'POST',

@@ -13,8 +13,46 @@ services:
       - mongodb_data:/data/db
     networks:
       - email-builder-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
 
-  # FastAPI Backend
+  rabbitmq:
+    image: "rabbitmq:3.13-management"
+    container_name: email-builder-rabbitmq
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=user
+      - RABBITMQ_DEFAULT_PASS=password
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - email-builder-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: "redis:alpine"
+    container_name: email-builder-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - email-builder-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -25,15 +63,34 @@ services:
       - "8000:8000"
     env_file:
       - ./backend/.env
-    environment:
-      - MONGODB_URI=mongodb://admin:password123@mongodb:27017/emailbuilder?authSource=admin
-      - DATABASE_NAME=emailbuilder
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - email-builder-network
 
-  # Frontend Application
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: email-builder-worker
+    command: celery -A app.celery_worker.celery worker --loglevel=info
+    env_file:
+      - ./backend/.env
+    depends_on:
+      backend:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - email-builder-network
+
   frontend:
     build:
       context: ./frontend
@@ -42,22 +99,18 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-    environment:
-      - NODE_ENV=production
-      - NEXT_TELEMETRY_DISABLED=1
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
     depends_on:
-      - backend
+      backend:
+        condition: service_started
     networks:
       - email-builder-network
-
-  # Background tasks handled by built-in BackgroundTaskManager
-  # No external dependencies needed
 
 volumes:
   mongodb_data:
     driver: local
+  rabbitmq_data:
+    driver: local
 
 networks:
   email-builder-network:
-    driver: bridge 
+    driver: bridge

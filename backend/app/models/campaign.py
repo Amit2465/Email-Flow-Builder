@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 class CampaignModel(Document):
     campaign_id: str = Field(..., example="campaign_1754062199795")
     name: str = Field(..., example="Welcome Campaign")
-    status: Literal["ready", "running", "paused", "completed"] = "ready"
+    status: Literal["ready", "running", "paused", "completed", "failed"] = "ready"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None  # Add the missing field
     nodes: List[dict]  # Flexible dict structure for frontend data
     connections: List[dict]  # Flexible dict structure for frontend data
     workflow: dict  # Flexible dict structure for frontend data
@@ -26,6 +27,7 @@ class CampaignModel(Document):
                 "status": "ready",
                 "created_at": "2025-08-01T19:30:00.000Z",
                 "updated_at": "2025-08-01T19:30:00.000Z",
+                "completed_at": None,
                 "nodes": [],
                 "connections": [],
                 "workflow": {
