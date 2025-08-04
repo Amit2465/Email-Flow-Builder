@@ -1,6 +1,6 @@
 from beanie import Document
 from pydantic import Field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 class LeadJournal(Document):
@@ -10,7 +10,7 @@ class LeadJournal(Document):
     """
     lead_id: str = Field(..., index=True)
     campaign_id: str = Field(..., index=True)
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     message: str
     node_id: Optional[str] = None
     node_type: Optional[str] = None

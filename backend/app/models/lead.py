@@ -22,6 +22,10 @@ class LeadModel(Document):
     wait_until: Optional[datetime] = None
     scheduled_task_id: Optional[str] = None
     next_node: Optional[str] = None
+    sent_emails: List[str] = Field(default_factory=list)  # Track which email nodes have been sent
+    completed_tasks: List[str] = Field(default_factory=list)  # Track which nodes have been completed with task IDs
+    completed_waits: List[str] = Field(default_factory=list)  # Track which wait nodes have been completed
+    last_resume_at: Optional[datetime] = None  # Track when the lead was last resumed to prevent duplicate resumes
 
     class Settings:
         name = "leads" 
