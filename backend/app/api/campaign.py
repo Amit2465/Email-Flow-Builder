@@ -34,6 +34,13 @@ async def create_campaign(campaign_data: CampaignRequest):
     Create a new campaign from frontend JSON data
     """
     logger.info("Campaign creation endpoint called")
+    logger.info(f"=== FRONTEND DATA RECEIVED ===")
+    logger.info(f"Campaign: {campaign_data.campaign}")
+    logger.info(f"Nodes count: {len(campaign_data.nodes)}")
+    logger.info(f"Connections count: {len(campaign_data.connections)}")
+    logger.info(f"Workflow: {campaign_data.workflow}")
+    logger.info(f"Contact file: {campaign_data.contact_file}")
+    logger.info(f"=== END FRONTEND DATA ===")
     
     try:
         # Extract campaign info

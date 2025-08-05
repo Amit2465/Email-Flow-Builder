@@ -1,0 +1,269 @@
+EMAILBUILDER SYSTEM ARCHITECTURE DOCUMENTATION
+================================================
+
+OVERVIEW
+--------
+EmailBuilder is a distributed email automation system that allows users to create 
+visual email campaigns with drag-and-drop flow builders. The system processes 
+leads through automated workflows with email sending, wait periods, and conditional logic.
+
+SYSTEM COMPONENTS
+=================
+
+1. FRONTEND (React/Next.js)
+   - Port: 3000
+   - Purpose: Visual flow builder interface
+   - Technology: React with TypeScript, Canvas-based flow editor
+   - Function: Design email campaigns with drag-and-drop nodes
+
+2. BACKEND (FastAPI)
+   - Port: 8000
+   - Purpose: API server and flow orchestration
+   - Technology: FastAPI with async/await
+   - Function: Campaign management, lead processing, flow execution
+
+3. CELERY WORKERS
+   - Purpose: Background task processing
+   - Technology: Celery with Python
+   - Function: Email sending, lead resumption, task scheduling
+
+4. MESSAGE BROKERS
+   - RabbitMQ: Task queue and message routing (Port: 5672, Management: 15672)
+   - Redis: Result backend and caching (Port: 6379)
+
+5. DATABASE
+   - MongoDB: Primary database (Port: 27017)
+   - Purpose: Store campaigns, leads, and execution state
+
+DATA FLOW ARCHITECTURE
+======================
+
+A. CAMPAIGN CREATION FLOW
+-------------------------
+1. Frontend → FastAPI: POST /campaigns
+2. FastAPI → MongoDB: Save campaign config
+3. FastAPI → FlowExecutor: Parse contacts
+4. FlowExecutor → MongoDB: Create leads
+5. FlowExecutor → Execute first node
+
+B. EMAIL NODE EXECUTION FLOW
+-----------------------------
+1. FlowExecutor → Celery: send_email_task.delay()
+2. Celery → RabbitMQ: Queue task
+3. RabbitMQ → Celery Worker: Pick up task
+4. Celery Worker → Email Service: Send email
+5. Celery Worker → Redis: Store result
+6. FlowExecutor → Next Node: Continue flow
+
+C. WAIT NODE EXECUTION FLOW
+---------------------------
+1. FlowExecutor → MongoDB: Pause lead
+2. FlowExecutor → Celery: resume_lead_task.apply_async(eta=wait_time)
+3. Celery → RabbitMQ: Schedule delayed task
+4. RabbitMQ → Celery Worker: Execute at scheduled time
+5. Celery Worker → FlowExecutor: Resume lead
+6. FlowExecutor → Next Node: Continue flow
+
+KEY DATA STRUCTURES
+==================
+
+CAMPAIGN DATA
+-------------
+{
+  "campaign_id": "campaign_123",
+  "nodes": [
+    {"id": "start-1", "type": "start"},
+    {"id": "email-1", "type": "sendEmail", "configuration": {...}},
+    {"id": "wait-1", "type": "wait", "configuration": {...}},
+    {"id": "email-2", "type": "sendEmail", "configuration": {...}}
+  ],
+  "connections": [
+    {"from_node": "start-1", "to_node": "email-1"},
+    {"from_node": "email-1", "to_node": "wait-1"},
+    {"from_node": "wait-1", "to_node": "email-2"}
+  ]
+}
+
+LEAD DATA
+---------
+{
+  "lead_id": "lead_campaign_123_0_1234567890",
+  "campaign_id": "campaign_123",
+  "email": "user@example.com",
+  "status": "running",  # pending, running, paused, completed, failed
+  "current_node": "email-1",
+  "execution_path": ["start-1", "email-1"],
+  "completed_tasks": ["start-1"],
+  "sent_emails": ["email-1"],
+  "wait_until": "2024-01-01T12:00:00Z",
+  "scheduled_task_id": "celery-task-id"
+}
+
+TASK TYPES AND KEYS
+===================
+
+EMAIL TASK
+----------
+Task: send_email_task
+{
+  "lead_id": "lead_123",
+  "campaign_id": "campaign_123", 
+  "subject": "Welcome Email",
+  "body": "Hello...",
+  "recipient_email": "user@example.com",
+  "node_id": "email-1"
+}
+
+RESUME TASK
+-----------
+Task: resume_lead_task
+{
+  "lead_id": "lead_123",
+  "campaign_id": "campaign_123"
+}
+
+RABBITMQ QUEUE STRUCTURE
+========================
+RabbitMQ Queues:
+├── celery (default queue)
+│   ├── send_email_task
+│   ├── resume_lead_task  
+│   └── resume_condition_task
+└── celery (delayed tasks)
+    └── scheduled_resume_tasks
+
+REDIS DATA STRUCTURE
+===================
+Redis Keys:
+├── celery-task-meta:{task_id}
+│   ├── status: "SUCCESS"
+│   ├── result: null
+│   └── date_done: "2024-01-01T12:00:00Z"
+├── celery-task-meta:{task_id}
+│   ├── status: "PENDING"
+│   └── eta: "2024-01-01T12:05:00Z"
+└── session:{session_id}
+    └── user_data: {...}
+
+NETWORK COMMUNICATION
+====================
+
+INTERNAL COMMUNICATION
+---------------------
+Frontend (3000) → Backend (8000) → MongoDB (27017)
+Backend (8000) → Celery → RabbitMQ (5672)
+Celery Worker → Redis (6379)
+
+EXTERNAL COMMUNICATION
+---------------------
+Backend → SMTP Server: Send emails
+Backend → Tracking Service: Track email opens/clicks
+
+ERROR HANDLING & RELIABILITY
+============================
+
+TASK RETRY LOGIC
+----------------
+@celery_app.task(max_retries=3, retry_backoff=True)
+def send_email_task():
+    # Celery automatically retries failed tasks
+    # Exponential backoff: 1s, 2s, 4s delays
+
+STATE RECOVERY
+--------------
+# If worker crashes, tasks remain in RabbitMQ
+# When worker restarts, it picks up pending tasks
+# Lead state is preserved in MongoDB
+
+SCALABILITY FEATURES
+===================
+
+HORIZONTAL SCALING
+------------------
+# Can run multiple workers
+worker-1: celery worker --loglevel=info
+worker-2: celery worker --loglevel=info
+worker-3: celery worker --loglevel=info
+
+LOAD DISTRIBUTION
+-----------------
+RabbitMQ automatically distributes tasks across available workers
+Redis provides shared state for all workers
+MongoDB ensures data consistency across instances
+
+KEY INSIGHTS
+============
+
+RABBITMQ HANDLES THE "WHEN"
+---------------------------
+- Task scheduling and delivery
+- Message routing between components
+- Reliable message persistence
+- Load balancing across workers
+
+REDIS HANDLES THE "WHAT"
+------------------------
+- Task results and execution status
+- Caching frequently accessed data
+- Session storage and temporary state
+- Shared state across workers
+
+MONGODB HANDLES THE "WHO"
+-------------------------
+- Lead data and execution state
+- Campaign configurations
+- Execution journals and logs
+- Persistent business data
+
+ARCHITECTURE BENEFITS
+====================
+
+RELIABILITY
+-----------
+- Tasks persist even if workers crash
+- Automatic retry mechanisms
+- State recovery capabilities
+- Data consistency across components
+
+SCALABILITY
+-----------
+- Horizontal scaling with multiple workers
+- Load distribution via RabbitMQ
+- Shared state via Redis
+- Database consistency via MongoDB
+
+MONITORING
+----------
+- RabbitMQ management UI for queue monitoring
+- Redis CLI for cache inspection
+- MongoDB Compass for data analysis
+- Comprehensive logging throughout system
+
+FLEXIBILITY
+-----------
+- Easy to add new task types
+- Modular component design
+- Async processing for time-consuming operations
+- Plugin architecture for extensions
+
+DEPLOYMENT
+==========
+
+DOCKER COMPOSE SERVICES
+-----------------------
+- mongodb: Primary database
+- rabbitmq: Message broker
+- redis: Cache and result backend
+- backend: FastAPI application
+- worker: Celery worker processes
+- frontend: React application
+
+HEALTH CHECKS
+-------------
+- MongoDB: Database connectivity
+- RabbitMQ: Message broker health
+- Redis: Cache service status
+- Backend: API server availability
+
+This architecture provides a robust, scalable, and maintainable email automation 
+system that can handle complex workflows with reliability and performance. 
