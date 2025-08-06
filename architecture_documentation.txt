@@ -1,269 +1,190 @@
-EMAILBUILDER SYSTEM ARCHITECTURE DOCUMENTATION
-================================================
+EMAILBUILDER AI DEVELOPMENT PROMPT
+==================================
 
-OVERVIEW
---------
-EmailBuilder is a distributed email automation system that allows users to create 
-visual email campaigns with drag-and-drop flow builders. The system processes 
-leads through automated workflows with email sending, wait periods, and conditional logic.
+SYSTEM OVERVIEW
+---------------
+Build a sophisticated email marketing automation system with complex conditional branching logic. The system must handle multiple condition nodes, parallel execution paths, event-based triggering, and timeout mechanisms.
 
-SYSTEM COMPONENTS
-=================
-
-1. FRONTEND (React/Next.js)
-   - Port: 3000
-   - Purpose: Visual flow builder interface
-   - Technology: React with TypeScript, Canvas-based flow editor
-   - Function: Design email campaigns with drag-and-drop nodes
-
-2. BACKEND (FastAPI)
-   - Port: 8000
-   - Purpose: API server and flow orchestration
-   - Technology: FastAPI with async/await
-   - Function: Campaign management, lead processing, flow execution
-
-3. CELERY WORKERS
-   - Purpose: Background task processing
-   - Technology: Celery with Python
-   - Function: Email sending, lead resumption, task scheduling
-
-4. MESSAGE BROKERS
-   - RabbitMQ: Task queue and message routing (Port: 5672, Management: 15672)
-   - Redis: Result backend and caching (Port: 6379)
-
-5. DATABASE
-   - MongoDB: Primary database (Port: 27017)
-   - Purpose: Store campaigns, leads, and execution state
-
-DATA FLOW ARCHITECTURE
-======================
-
-A. CAMPAIGN CREATION FLOW
--------------------------
-1. Frontend → FastAPI: POST /campaigns
-2. FastAPI → MongoDB: Save campaign config
-3. FastAPI → FlowExecutor: Parse contacts
-4. FlowExecutor → MongoDB: Create leads
-5. FlowExecutor → Execute first node
-
-B. EMAIL NODE EXECUTION FLOW
------------------------------
-1. FlowExecutor → Celery: send_email_task.delay()
-2. Celery → RabbitMQ: Queue task
-3. RabbitMQ → Celery Worker: Pick up task
-4. Celery Worker → Email Service: Send email
-5. Celery Worker → Redis: Store result
-6. FlowExecutor → Next Node: Continue flow
-
-C. WAIT NODE EXECUTION FLOW
----------------------------
-1. FlowExecutor → MongoDB: Pause lead
-2. FlowExecutor → Celery: resume_lead_task.apply_async(eta=wait_time)
-3. Celery → RabbitMQ: Schedule delayed task
-4. RabbitMQ → Celery Worker: Execute at scheduled time
-5. Celery Worker → FlowExecutor: Resume lead
-6. FlowExecutor → Next Node: Continue flow
-
-KEY DATA STRUCTURES
-==================
-
-CAMPAIGN DATA
--------------
-{
-  "campaign_id": "campaign_123",
-  "nodes": [
-    {"id": "start-1", "type": "start"},
-    {"id": "email-1", "type": "sendEmail", "configuration": {...}},
-    {"id": "wait-1", "type": "wait", "configuration": {...}},
-    {"id": "email-2", "type": "sendEmail", "configuration": {...}}
-  ],
-  "connections": [
-    {"from_node": "start-1", "to_node": "email-1"},
-    {"from_node": "email-1", "to_node": "wait-1"},
-    {"from_node": "wait-1", "to_node": "email-2"}
-  ]
-}
-
-LEAD DATA
----------
-{
-  "lead_id": "lead_campaign_123_0_1234567890",
-  "campaign_id": "campaign_123",
-  "email": "user@example.com",
-  "status": "running",  # pending, running, paused, completed, failed
-  "current_node": "email-1",
-  "execution_path": ["start-1", "email-1"],
-  "completed_tasks": ["start-1"],
-  "sent_emails": ["email-1"],
-  "wait_until": "2024-01-01T12:00:00Z",
-  "scheduled_task_id": "celery-task-id"
-}
-
-TASK TYPES AND KEYS
-===================
-
-EMAIL TASK
-----------
-Task: send_email_task
-{
-  "lead_id": "lead_123",
-  "campaign_id": "campaign_123", 
-  "subject": "Welcome Email",
-  "body": "Hello...",
-  "recipient_email": "user@example.com",
-  "node_id": "email-1"
-}
-
-RESUME TASK
------------
-Task: resume_lead_task
-{
-  "lead_id": "lead_123",
-  "campaign_id": "campaign_123"
-}
-
-RABBITMQ QUEUE STRUCTURE
-========================
-RabbitMQ Queues:
-├── celery (default queue)
-│   ├── send_email_task
-│   ├── resume_lead_task  
-│   └── resume_condition_task
-└── celery (delayed tasks)
-    └── scheduled_resume_tasks
-
-REDIS DATA STRUCTURE
-===================
-Redis Keys:
-├── celery-task-meta:{task_id}
-│   ├── status: "SUCCESS"
-│   ├── result: null
-│   └── date_done: "2024-01-01T12:00:00Z"
-├── celery-task-meta:{task_id}
-│   ├── status: "PENDING"
-│   └── eta: "2024-01-01T12:05:00Z"
-└── session:{session_id}
-    └── user_data: {...}
-
-NETWORK COMMUNICATION
-====================
-
-INTERNAL COMMUNICATION
----------------------
-Frontend (3000) → Backend (8000) → MongoDB (27017)
-Backend (8000) → Celery → RabbitMQ (5672)
-Celery Worker → Redis (6379)
-
-EXTERNAL COMMUNICATION
----------------------
-Backend → SMTP Server: Send emails
-Backend → Tracking Service: Track email opens/clicks
-
-ERROR HANDLING & RELIABILITY
-============================
-
-TASK RETRY LOGIC
-----------------
-@celery_app.task(max_retries=3, retry_backoff=True)
-def send_email_task():
-    # Celery automatically retries failed tasks
-    # Exponential backoff: 1s, 2s, 4s delays
-
-STATE RECOVERY
---------------
-# If worker crashes, tasks remain in RabbitMQ
-# When worker restarts, it picks up pending tasks
-# Lead state is preserved in MongoDB
-
-SCALABILITY FEATURES
-===================
-
-HORIZONTAL SCALING
-------------------
-# Can run multiple workers
-worker-1: celery worker --loglevel=info
-worker-2: celery worker --loglevel=info
-worker-3: celery worker --loglevel=info
-
-LOAD DISTRIBUTION
+CORE LOGIC & FLOW
 -----------------
-RabbitMQ automatically distributes tasks across available workers
-Redis provides shared state for all workers
-MongoDB ensures data consistency across instances
 
-KEY INSIGHTS
-============
+CONDITIONAL NODE LOGIC:
+- Condition nodes check for email_open or link_click events
+- BOTH YES and NO paths must execute simultaneously
+- YES path: Waits for event to occur, then executes
+- NO path: Starts immediately (acts as timeout mechanism)
+- Campaign completion depends ONLY on NO branch completion
 
-RABBITMQ HANDLES THE "WHEN"
----------------------------
-- Task scheduling and delivery
-- Message routing between components
-- Reliable message persistence
-- Load balancing across workers
+WHY WAIT NODE MUST BE FIRST IN NO PATH:
+- NO path acts as timeout mechanism for the entire condition
+- If event occurs during wait: YES path triggers immediately, NO path continues running
+- If no event occurs: NO path completes normally after wait
+- This ensures campaign doesn't end prematurely while waiting for events
 
-REDIS HANDLES THE "WHAT"
-------------------------
-- Task results and execution status
-- Caching frequently accessed data
-- Session storage and temporary state
-- Shared state across workers
+MULTIPLE CONDITION NODE HANDLING:
+- System must handle chained condition nodes (Email → Condition1 → Condition2)
+- Each condition node can have different event types (open vs click)
+- Events can cascade through multiple conditions
+- Each condition node must track which email it's monitoring
+- Parallel execution must work across multiple conditions simultaneously
 
-MONGODB HANDLES THE "WHO"
--------------------------
-- Lead data and execution state
-- Campaign configurations
-- Execution journals and logs
-- Persistent business data
+PARALLEL EXECUTION LOGIC:
+- Original lead continues NO path (timeout mechanism)
+- Parallel lead created for YES path (immediate execution)
+- Both paths execute independently and simultaneously
+- Campaign completion only tracks original leads and NO branch leads
+- YES branches complete quickly and don't affect campaign completion
 
-ARCHITECTURE BENEFITS
-====================
+EVENT TRACKING SYSTEM:
+- Email open tracking via 1x1 pixel in email HTML
+- Link click tracking via URL redirection with tracking parameters
+- Events must trigger immediate execution of condition nodes
+- Events must be processed atomically to prevent race conditions
+- Multiple events can occur simultaneously and must be handled properly
 
-RELIABILITY
------------
-- Tasks persist even if workers crash
-- Automatic retry mechanisms
-- State recovery capabilities
-- Data consistency across components
+CAMPAIGN COMPLETION LOGIC:
+- Campaign ends when ALL NO branches reach end nodes
+- YES branches complete quickly (immediate execution) and don't affect completion
+- NO branches act as timeouts (longer duration) and determine campaign completion
+- System must track original leads and NO branch leads separately
+- Only count active original leads + active NO leads for completion
 
-SCALABILITY
------------
-- Horizontal scaling with multiple workers
-- Load distribution via RabbitMQ
-- Shared state via Redis
-- Database consistency via MongoDB
-
-MONITORING
-----------
-- RabbitMQ management UI for queue monitoring
-- Redis CLI for cache inspection
-- MongoDB Compass for data analysis
-- Comprehensive logging throughout system
-
-FLEXIBILITY
------------
-- Easy to add new task types
-- Modular component design
-- Async processing for time-consuming operations
-- Plugin architecture for extensions
-
-DEPLOYMENT
-==========
-
-DOCKER COMPOSE SERVICES
+FLOW EXECUTION PATTERNS
 -----------------------
-- mongodb: Primary database
-- rabbitmq: Message broker
-- redis: Cache and result backend
-- backend: FastAPI application
-- worker: Celery worker processes
-- frontend: React application
 
-HEALTH CHECKS
--------------
-- MongoDB: Database connectivity
-- RabbitMQ: Message broker health
-- Redis: Cache service status
-- Backend: API server availability
+BASIC CONDITIONAL FLOW:
+1. Email sent with tracking pixel and tracking links
+2. Condition node checks for email open event
+3. If event already occurred: Execute YES path immediately
+4. If no event: Create waiting event + Execute NO path immediately
+5. If event occurs later: YES path triggers, NO path continues
+6. Campaign ends when NO path reaches end node
 
-This architecture provides a robust, scalable, and maintainable email automation 
-system that can handle complex workflows with reliability and performance. 
+CHAINED CONDITIONAL FLOW:
+1. Email → Condition1(open) → YES → Condition2(click) → YES → End
+2. If email opened: Condition1 YES triggers → Condition2 checks for link click
+3. If email not opened: Condition1 NO starts immediately with wait node
+4. If link clicked: Condition2 YES triggers → End
+5. If no link clicked: Condition2 NO continues → End
+6. Campaign ends when all NO branches reach end nodes
+
+COMPLEX PARALLEL EXECUTION:
+1. Multiple leads can execute different paths simultaneously
+2. Each lead can have multiple parallel paths (YES/NO branches)
+3. Events can trigger multiple condition nodes for same lead
+4. System must handle race conditions between parallel executions
+5. Database consistency must be maintained across parallel operations
+
+EDGE CASES & REQUIREMENTS
+-------------------------
+
+CHAINED CONDITION NODES:
+- Condition2 must track the correct email (the one before Condition1)
+- If Condition1 YES path triggers, Condition2 must track the same email
+- If Condition1 NO path triggers, Condition2 must track the email in NO path
+- System must maintain email tracking context across multiple conditions
+
+EVENT RACE CONDITIONS:
+- Multiple events can occur simultaneously for same lead
+- System must process oldest event first to maintain order
+- Prevent duplicate event processing for same condition
+- Handle events that occur after condition node is already completed
+- Events must be processed atomically to prevent conflicts
+
+WAIT NODE INTERRUPTION:
+- If event occurs during wait, scheduled task must be revoked
+- Lead must resume immediately via event trigger
+- Original NO path continues running independently
+- Both YES and NO paths can complete independently
+- System must handle task revocation gracefully
+
+MISSING NO PATH HANDLING:
+- Every condition node MUST have a NO path
+- NO path MUST start with a wait node (timeout mechanism)
+- System must validate campaign structure before execution
+- Handle cases where NO path is missing or invalid
+- Provide clear error messages for invalid campaign structures
+
+PARALLEL LEAD DUPLICATION:
+- Prevent creating duplicate parallel leads for same condition
+- Check for existing parallel leads before creating new ones
+- Handle cases where parallel lead already exists
+- Maintain proper lead relationships and tracking
+
+CAMPAIGN VALIDATION REQUIREMENTS:
+- Check for infinite loops in campaign structure
+- Validate all condition nodes have both YES and NO paths
+- Ensure all paths eventually reach end nodes
+- Validate email nodes exist before condition nodes
+- Check for proper node connections and flow logic
+
+DATABASE CONSISTENCY:
+- Use atomic operations for lead state updates
+- Handle database connection failures gracefully
+- Implement retry logic for failed operations
+- Ensure data consistency across parallel executions
+- Prevent race conditions in lead state updates
+
+ERROR RECOVERY MECHANISMS:
+- Stuck lead detection and automatic recovery
+- Task revocation for interrupted operations
+- Graceful handling of failed email sends
+- Campaign status updates on failures
+- Automatic retry mechanisms for failed operations
+
+PERFORMANCE CONSIDERATIONS
+-------------------------
+
+SCALABILITY REQUIREMENTS:
+- Handle thousands of leads per campaign
+- Support multiple campaigns running simultaneously
+- Efficient database queries for lead tracking
+- Celery worker scaling for background tasks
+- Memory management for parallel executions
+
+RELIABILITY REQUIREMENTS:
+- 99.9% uptime for critical operations
+- Automatic error recovery mechanisms
+- Data consistency guarantees
+- Task retry mechanisms with exponential backoff
+- Graceful degradation on service failures
+
+MONITORING REQUIREMENTS:
+- Comprehensive logging for every operation
+- Performance metrics for campaign execution
+- Error tracking and alerting
+- Campaign progress monitoring
+- Real-time status updates
+
+KEY INSIGHTS FOR IMPLEMENTATION
+------------------------------
+
+CONDITIONAL LOGIC PRINCIPLES:
+1. Both YES and NO paths execute simultaneously
+2. NO path acts as timeout mechanism, starts immediately
+3. Events can interrupt waits and trigger YES paths
+4. Campaign completion depends only on NO branch completion
+5. Parallel execution enables complex branching scenarios
+
+EVENT HANDLING PRINCIPLES:
+1. Events must be processed atomically
+2. Oldest events processed first to maintain order
+3. Events can trigger multiple condition nodes
+4. Events must be tracked per lead and condition node
+5. Event processing must be idempotent
+
+PARALLEL EXECUTION PRINCIPLES:
+1. Original lead continues NO path (timeout)
+2. Parallel lead created for YES path (immediate)
+3. Both paths execute independently
+4. Campaign completion only tracks original leads
+5. Race conditions must be handled gracefully
+
+TIMEOUT MECHANISM PRINCIPLES:
+1. Wait node must be first in every NO path
+2. Wait acts as timeout for entire condition
+3. Events can interrupt waits and trigger YES paths
+4. NO path continues even if YES path triggers
+5. Campaign completion depends on NO path completion
+
+This prompt provides the complete logical framework for building a robust email marketing automation system with sophisticated conditional logic and parallel execution capabilities. 

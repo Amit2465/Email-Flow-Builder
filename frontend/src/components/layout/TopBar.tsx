@@ -105,7 +105,7 @@ export const TopBar: React.FC = () => {
     // Test backend connection first
     try {
       console.log('=== TOPBAR: Testing backend connection ===')
-      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}`
+      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || 'https://ce4bb4e597bb.ngrok-free.app'}`
       console.log('Testing connection to:', apiUrl)
       
       const testResponse = await fetch(`${apiUrl}/test-cors`, {
@@ -137,8 +137,31 @@ export const TopBar: React.FC = () => {
 
     if (!isValidFlow) {
       console.log('=== TOPBAR: Flow is invalid, showing errors ===')
-      setToastErrors(validationErrors)
-      setShowErrorToast(true)
+      
+      // Check for specific link validation error and show helpful message
+      const hasLinkError = validationErrors.some(error => 
+        error.includes("needs at least one link since it's followed by a \"Link Clicked\" condition node")
+      )
+      
+      if (hasLinkError) {
+        // Show a helpful toast for link validation
+        import('sonner').then(({ toast }) => {
+          toast.error("Missing Links in Email", {
+            description: "You have a 'Link Clicked' condition node but the email above it doesn't have any links. Add at least one link to the email node to track click events.",
+            duration: 5000,
+            action: {
+              label: "Fix Now",
+              onClick: () => {
+                // Could potentially scroll to the email node or open its properties
+                console.log("User clicked to fix link issue")
+              }
+            }
+          })
+        })
+      } else {
+        setToastErrors(validationErrors)
+        setShowErrorToast(true)
+      }
       return
     }
 

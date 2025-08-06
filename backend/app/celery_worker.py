@@ -22,10 +22,17 @@ def on_worker_init(**kwargs):
         logger.info("Database connection initialized for Celery worker.")
     except Exception as e:
         logger.error(f"Failed to initialize database for Celery worker: {e}", exc_info=True)
-        # Depending on the desired behavior, you might want to exit the worker
-        # if the database connection is critical for all tasks.
-        # For now, we log the error and let it continue.
-        pass
+        # Retry initialization after a delay
+        import time
+        time.sleep(5)
+        try:
+            asyncio.run(init_db())
+            logger.info("Database connection initialized for Celery worker (retry successful).")
+        except Exception as retry_error:
+            logger.error(f"Failed to initialize database for Celery worker (retry failed): {retry_error}", exc_info=True)
+            # Exit the worker if database connection is critical
+            import sys
+            sys.exit(1)
 
 # The 'celery' variable is automatically detected by Celery
 # as long as it's an instance of the Celery class.

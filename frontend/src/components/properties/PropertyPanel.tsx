@@ -2,11 +2,35 @@
 
 import type React from "react"
 import { useState, useRef } from "react"
-import { X, Info, Upload, FileText, Trash2, Eye } from "lucide-react"
+import { X, Info, Upload, FileText, Trash2, Eye, AlertTriangle } from "lucide-react"
 import { useFlowStore } from "../../store/flowStore"
+import type { Node, Edge } from "@xyflow/react"
+
+// Helper function to find the email node that comes before a conditional node
+const findPrecedingEmailNode = (conditionalNodeId: string, nodes: Node[], edges: Edge[]): Node | null => {
+  // Find edges that connect to this conditional node
+  const incomingEdges = edges.filter(edge => edge.target === conditionalNodeId)
+  
+  for (const edge of incomingEdges) {
+    const sourceNode = nodes.find(node => node.id === edge.source)
+    if (sourceNode && sourceNode.type === "sendEmail") {
+      return sourceNode
+    }
+    
+    // If the source is not an email node, recursively check its predecessors
+    if (sourceNode) {
+      const precedingEmail = findPrecedingEmailNode(sourceNode.id, nodes, edges)
+      if (precedingEmail) {
+        return precedingEmail
+      }
+    }
+  }
+  
+  return null
+}
 
 export const PropertyPanel: React.FC = () => {
-  const { nodes, selectedNode, setSelectedNode, updateNode, contactFile, setContactFile } = useFlowStore()
+  const { nodes, edges, selectedNode, setSelectedNode, updateNode, contactFile, setContactFile } = useFlowStore()
   const [dragActive, setDragActive] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [previewData, setPreviewData] = useState<{ name: string[]; email: string[] } | null>(null)
@@ -14,7 +38,7 @@ export const PropertyPanel: React.FC = () => {
 
   const selectedNodeData = nodes.find((node) => node.id === selectedNode)
 
-  if (!selectedNode || !selectedNodeData) return null
+  if (!selectedNode || !selectedNodeData || !selectedNodeData.data) return null
 
   const handleClose = () => {
     setSelectedNode(null)
@@ -239,10 +263,10 @@ export const PropertyPanel: React.FC = () => {
               <label className="block text-sm font-medium text-gray-700 mb-2">Subject</label>
               <input
                 type="text"
-                value={selectedNodeData.data.config?.subject || ""}
+                value={selectedNodeData.data?.config?.subject || ""}
                 onChange={(e) =>
                   updateNode(selectedNode, {
-                    config: { ...selectedNodeData.data.config, subject: e.target.value },
+                    config: { ...selectedNodeData.data?.config, subject: e.target.value },
                   })
                 }
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
@@ -252,10 +276,10 @@ export const PropertyPanel: React.FC = () => {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Body</label>
               <textarea
-                value={selectedNodeData.data.config?.body || ""}
+                value={selectedNodeData.data?.config?.body || ""}
                 onChange={(e) =>
                   updateNode(selectedNode, {
-                    config: { ...selectedNodeData.data.config, body: e.target.value },
+                    config: { ...selectedNodeData.data?.config, body: e.target.value },
                   })
                 }
                 rows={8}
@@ -263,13 +287,77 @@ export const PropertyPanel: React.FC = () => {
                 placeholder="Enter email body content"
               />
             </div>
+            
+            {/* Link Management Section */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Links</label>
+              <div className="space-y-2">
+                {(selectedNodeData.data?.config?.links || []).map((link: any, index: number) => (
+                  <div key={index} className="flex space-x-2 items-center">
+                    <input
+                      type="text"
+                      value={link.text || ""}
+                      onChange={(e) => {
+                        const newLinks = [...(selectedNodeData.data?.config?.links || [])]
+                        newLinks[index] = { ...newLinks[index], text: e.target.value }
+                        updateNode(selectedNode, {
+                          config: { ...selectedNodeData.data?.config, links: newLinks },
+                        })
+                      }}
+                      placeholder="Link text"
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 text-sm"
+                    />
+                    <input
+                      type="url"
+                      value={link.url || ""}
+                      onChange={(e) => {
+                        const newLinks = [...(selectedNodeData.data?.config?.links || [])]
+                        newLinks[index] = { ...newLinks[index], url: e.target.value }
+                        updateNode(selectedNode, {
+                          config: { ...selectedNodeData.data?.config, links: newLinks },
+                        })
+                      }}
+                      placeholder="https://example.com"
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 text-sm"
+                    />
+                    <button
+                      onClick={() => {
+                        const newLinks = [...(selectedNodeData.data?.config?.links || [])]
+                        newLinks.splice(index, 1)
+                        updateNode(selectedNode, {
+                          config: { ...selectedNodeData.data?.config, links: newLinks },
+                        })
+                      }}
+                      className="p-2 text-red-500 hover:text-red-700"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  onClick={() => {
+                    const newLinks = [...(selectedNodeData.data?.config?.links || []), { text: "", url: "" }]
+                    updateNode(selectedNode, {
+                      config: { ...selectedNodeData.data?.config, links: newLinks },
+                    })
+                  }}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 text-sm"
+                >
+                  + Add Link
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                Add links to your email. These will be tracked for click events.
+              </p>
+            </div>
+            
             <div className="p-3 bg-blue-50 rounded-lg">
               <div className="flex items-start space-x-2">
                 <Info className="w-4 h-4 text-blue-600 mt-0.5" />
                 <div>
                   <p className="text-sm text-blue-800 font-medium">Email Configuration</p>
                   <p className="text-xs text-blue-600 mt-1">
-                    Configure the subject and body content for your email campaign.
+                    Configure the subject, body content, and links for your email campaign. Links will be automatically tracked for click events.
                   </p>
                 </div>
               </div>
@@ -287,19 +375,19 @@ export const PropertyPanel: React.FC = () => {
                   type="number"
                   min="1"
                   max="365"
-                  value={selectedNodeData.data.config?.waitDuration || 1}
+                  value={selectedNodeData.data?.config?.waitDuration || 1}
                   onChange={(e) =>
                     updateNode(selectedNode, {
-                      config: { ...selectedNodeData.data.config, waitDuration: Number.parseInt(e.target.value) || 1 },
+                      config: { ...selectedNodeData.data?.config, waitDuration: Number.parseInt(e.target.value) || 1 },
                     })
                   }
                   className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-yellow-500"
                 />
                 <select
-                  value={selectedNodeData.data.config?.waitUnit || "days"}
+                  value={selectedNodeData.data?.config?.waitUnit || "days"}
                   onChange={(e) =>
                     updateNode(selectedNode, {
-                      config: { ...selectedNodeData.data.config, waitUnit: e.target.value },
+                      config: { ...selectedNodeData.data?.config, waitUnit: e.target.value },
                     })
                   }
                   className="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-yellow-500"
@@ -330,24 +418,88 @@ export const PropertyPanel: React.FC = () => {
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Condition Type</label>
               <select
-                value={selectedNodeData.data.config?.conditionType || "open"}
+                value={selectedNodeData.data?.config?.conditionType || "open"}
                 onChange={(e) =>
                   updateNode(selectedNode, {
-                    config: { ...selectedNodeData.data.config, conditionType: e.target.value },
+                    config: { ...selectedNodeData.data?.config, conditionType: e.target.value },
                   })
                 }
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-purple-500"
               >
                 <option value="open">Email Opened</option>
+                <option value="click">Link Clicked</option>
               </select>
             </div>
+            
+            {/* Auto-detect email node and show status */}
+            {(() => {
+              // Find the email node that comes before this conditional node
+              const emailNode = findPrecedingEmailNode(selectedNode, nodes, edges)
+              
+              if (!emailNode) {
+                return (
+                  <div className="mt-2 p-2 bg-red-50 rounded-lg border border-red-200">
+                    <div className="flex items-start space-x-2">
+                      <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5" />
+                      <div>
+                        <p className="text-xs text-red-800 font-medium">No Email Node Found</p>
+                        <p className="text-xs text-red-700 mt-1">
+                          This condition requires an email node to come before it in the flow. Add an email node above this condition.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )
+              }
+              
+              const emailLinks = emailNode.data?.config?.links || []
+              const hasLinks = emailLinks.length > 0
+              
+              return (
+                <div className="mt-2 p-2 bg-green-50 rounded-lg border border-green-200">
+                  <div className="flex items-start space-x-2">
+                    <Info className="w-4 h-4 text-green-600 mt-0.5" />
+                    <div>
+                      <p className="text-xs text-green-800 font-medium">Tracking Email: {emailNode.data?.label}</p>
+                      <p className="text-xs text-green-700 mt-1">
+                        {selectedNodeData.data?.config?.conditionType === "open" 
+                          ? "This condition will track email opens from the email above."
+                          : hasLinks 
+                            ? `This condition will track link clicks from the email above. Found ${emailLinks.length} link(s).`
+                            : "This condition will track link clicks, but the email above has no links."
+                        }
+                      </p>
+                      {selectedNodeData.data?.config?.conditionType === "click" && !hasLinks && (
+                        <div className="mt-2 p-2 bg-yellow-50 rounded-lg border border-yellow-200">
+                          <div className="flex items-start space-x-2">
+                            <AlertTriangle className="w-4 h-4 text-yellow-600 mt-0.5" />
+                            <div>
+                              <p className="text-xs text-yellow-800 font-medium">No Links Available</p>
+                              <p className="text-xs text-yellow-700 mt-1">
+                                The email node above doesn't have any links. Add links to the email node to track click events.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+            
             <div className="p-3 bg-purple-50 rounded-lg">
               <div className="flex items-start space-x-2">
                 <Info className="w-4 h-4 text-purple-600 mt-0.5" />
                 <div>
                   <p className="text-sm text-purple-800 font-medium">Branching Logic</p>
                   <p className="text-xs text-purple-600 mt-1">
-                    Connect the "Yes" output to the path for users who meet the condition, and "No" for those who don't.
+                    {selectedNodeData.data?.config?.conditionType === "open" 
+                      ? "This condition will track if the email node above was opened by the recipient. Connect the 'Yes' output to the path for users who opened the email, and 'No' for those who didn't. The 'No' path must start with a wait node."
+                      : selectedNodeData.data?.config?.conditionType === "click"
+                      ? "This condition will track if any link was clicked in the email above. Connect the 'Yes' output to the path for users who clicked a link, and 'No' for those who didn't. The 'No' path must start with a wait node."
+                      : "Connect the 'Yes' output to the path for users who meet the condition, and 'No' for those who don't. The 'No' path must start with a wait node."
+                    }
                   </p>
                 </div>
               </div>

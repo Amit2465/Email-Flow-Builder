@@ -32,6 +32,7 @@ services:
       - RABBITMQ_DEFAULT_PASS=password
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+    user: "999:999"
     networks:
       - email-builder-network
     healthcheck:
@@ -78,12 +79,13 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: email-builder-worker
+    restart: unless-stopped
     command: celery -A app.celery_worker.celery worker --loglevel=info
     env_file:
       - ./backend/.env
     depends_on:
-      backend:
-        condition: service_started
+      mongodb:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
       redis:

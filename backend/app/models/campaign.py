@@ -11,6 +11,7 @@ class CampaignModel(Document):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None  # Add the missing field
+    error_message: Optional[str] = None  # Add error message field
     nodes: List[dict]  # Flexible dict structure for frontend data
     connections: List[dict]  # Flexible dict structure for frontend data
     workflow: dict  # Flexible dict structure for frontend data

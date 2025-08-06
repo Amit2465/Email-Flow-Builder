@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(name="app.tasks.send_email_task", acks_late=True, max_retries=3)
 def send_email_task(
-    lead_id: str, campaign_id: str, subject: str, body: str, recipient_email: str, node_id: str
+    lead_id: str, campaign_id: str, subject: str, body: str, recipient_email: str, node_id: str, links: list = None
 ):
     from app.tasks import resume_lead_task  
     from app.db.init import init_db
@@ -20,27 +20,42 @@ def send_email_task(
     import time
 
     try:
-        logger.info(f"Executing send_email_task for lead {lead_id} from node {node_id}")
+        logger.info(f"=== SEND_EMAIL_TASK STARTED ===")
+        logger.info(f"Lead ID: {lead_id}")
+        logger.info(f"Campaign ID: {campaign_id}")
+        logger.info(f"Node ID: {node_id}")
+        logger.info(f"Recipient: {recipient_email}")
+        logger.info(f"Subject: {subject}")
 
-        # Send the email
-        send_email_with_tracking(
-            subject=subject,
-            body=body,
-            recipient_email=recipient_email,
-            lead_id=lead_id,
-            campaign_id=campaign_id,
-        )
+        # Send the email with proper error handling
+        try:
+            send_email_with_tracking(
+                subject=subject,
+                body=body,
+                recipient_email=recipient_email,
+                lead_id=lead_id,
+                campaign_id=campaign_id,
+                links=links,
+            )
+            logger.info(f"Successfully sent email for lead {lead_id}")
+        except Exception as email_error:
+            logger.error(f"Failed to send email for lead {lead_id}: {email_error}", exc_info=True)
+            # Don't trigger resume if email failed
+            raise
 
-        logger.info(f"Successfully processed send_email_task for lead {lead_id}")
-
-        # ✅ CRITICAL: Longer delay to ensure lead state is properly established
-        time.sleep(1.0)
+        # ✅ CRITICAL: Shorter delay to ensure lead state is properly established
+        time.sleep(0.5)
         
         # ✅ Trigger continuation of the flow
+        logger.info(f"Triggering resume_lead_task for lead {lead_id}")
         resume_lead_task.delay(lead_id, campaign_id)
+        logger.info(f"=== SEND_EMAIL_TASK COMPLETED ===")
 
     except Exception as e:
-        logger.error(f"Error in send_email_task for lead {lead_id}: {e}", exc_info=True)
+        logger.error(f"=== SEND_EMAIL_TASK FAILED ===")
+        logger.error(f"Lead ID: {lead_id}")
+        logger.error(f"Campaign ID: {campaign_id}")
+        logger.error(f"Error: {e}", exc_info=True)
         raise
 
 
@@ -53,15 +68,24 @@ def resume_lead_task(lead_id: str, campaign_id: str):
 
     async def resume():
         await init_db()
-        logger.info(f"Executing resume_lead_task for lead {lead_id}")
+        logger.info(f"=== RESUME_LEAD_TASK STARTED ===")
+        logger.info(f"Lead ID: {lead_id}")
+        logger.info(f"Campaign ID: {campaign_id}")
+        logger.info(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+        
         executor = FlowExecutor(campaign_id)
         # Call resume_lead for wait nodes and email nodes (condition_met is None)
         await executor.resume_lead(lead_id=lead_id)
+        
+        logger.info(f"=== RESUME_LEAD_TASK COMPLETED ===")
 
     try:
         asyncio.run(resume())
     except Exception as e:
-        logger.error(f"Error resuming lead {lead_id}: {e}", exc_info=True)
+        logger.error(f"=== RESUME_LEAD_TASK FAILED ===")
+        logger.error(f"Lead ID: {lead_id}")
+        logger.error(f"Campaign ID: {campaign_id}")
+        logger.error(f"Error: {e}", exc_info=True)
         raise
 
 
@@ -69,20 +93,57 @@ def resume_lead_task(lead_id: str, campaign_id: str):
 def resume_condition_task(lead_id: str, campaign_id: str, condition_met: bool = False):
     """
     Celery task to resume a lead's execution after a CONDITION node.
+    Enhanced for immediate execution when events occur.
     """
     from app.services.flow_executor import FlowExecutor
 
     async def resume():
         await init_db()
-        logger.info(f"Executing resume_condition_task for lead {lead_id}, condition_met: {condition_met}")
+        logger.info(f"=== CONDITION_RESUME_TASK STARTED ===")
+        logger.info(f"Lead ID: {lead_id}")
+        logger.info(f"Campaign ID: {campaign_id}")
+        logger.info(f"Condition Met: {condition_met}")
+        logger.info(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+        
         executor = FlowExecutor(campaign_id)
-        # Call resume_lead with the condition_met parameter
-        await executor.resume_lead(lead_id=lead_id, condition_met=condition_met)
+        
+        if condition_met:
+            # Find the specific condition node that was triggered
+            from app.services.event_tracker import EventTracker
+            event_tracker = EventTracker(campaign_id)
+            
+            # Get the most recent processed event for this lead
+            from app.models.lead_event import LeadEvent
+            recent_event = await LeadEvent.find_one({
+                "lead_id": lead_id,
+                "campaign_id": campaign_id,
+                "processed": True
+            }, sort=[("processed_at", -1)])
+            
+            if recent_event:
+                logger.info(f"Found recent event for condition node: {recent_event.condition_node_id}")
+                await executor.load_campaign()
+                await executor.resume_lead_from_condition(
+                    lead_id=lead_id, 
+                    condition_node_id=recent_event.condition_node_id, 
+                    condition_met=True
+                )
+            else:
+                logger.warning(f"No recent event found for lead {lead_id}, using general resume")
+                await executor.resume_lead(lead_id=lead_id, condition_met=condition_met)
+        else:
+            # General resume for non-event scenarios
+            await executor.resume_lead(lead_id=lead_id, condition_met=condition_met)
+        
+        logger.info(f"=== CONDITION_RESUME_TASK COMPLETED ===")
 
     try:
         asyncio.run(resume())
     except Exception as e:
-        logger.error(f"Error resuming condition lead {lead_id}: {e}", exc_info=True)
+        logger.error(f"=== CONDITION_RESUME_TASK FAILED ===")
+        logger.error(f"Lead ID: {lead_id}")
+        logger.error(f"Campaign ID: {campaign_id}")
+        logger.error(f"Error: {e}", exc_info=True)
         raise
 
 
@@ -139,4 +200,96 @@ def recover_stuck_leads_task():
         asyncio.run(recover())
     except Exception as e:
         logger.error(f"Error in recover_stuck_leads_task: {e}", exc_info=True)
+        raise
+
+
+@celery_app.task(name="app.tasks.cleanup_old_data_task", acks_late=True, max_retries=3)
+def cleanup_old_data_task():
+    """
+    Celery task to automatically clean up old campaign data.
+    Runs periodically to prevent database bloat.
+    """
+    from app.models.campaign import CampaignModel
+    from app.models.lead import LeadModel
+    from app.models.lead_event import LeadEvent
+    from app.models.lead_journal import LeadJournal
+
+    async def cleanup():
+        await init_db()
+        logger.info("=== AUTOMATIC CLEANUP TASK STARTED ===")
+        
+        # Find campaigns completed more than 7 days ago
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=7)
+        
+        old_campaigns = await CampaignModel.find({
+            "status": "completed",
+            "completed_at": {"$lt": cutoff_date}
+        }).to_list()
+        
+        if not old_campaigns:
+            logger.info("No old campaigns found for cleanup")
+            return
+        
+        logger.info(f"Found {len(old_campaigns)} old campaigns for cleanup")
+        
+        total_deleted_leads = 0
+        total_deleted_events = 0
+        total_deleted_journals = 0
+        
+        for campaign in old_campaigns:
+            try:
+                logger.info(f"Cleaning up campaign {campaign.campaign_id}")
+                
+                # Delete leads
+                leads_result = await LeadModel.delete_many({"campaign_id": campaign.campaign_id})
+                deleted_leads = leads_result.deleted_count
+                total_deleted_leads += deleted_leads
+                
+                # Delete events
+                events_result = await LeadEvent.delete_many({"campaign_id": campaign.campaign_id})
+                deleted_events = events_result.deleted_count
+                total_deleted_events += deleted_events
+                
+                # Delete journal entries
+                journals_result = await LeadJournal.delete_many({"campaign_id": campaign.campaign_id})
+                deleted_journals = journals_result.deleted_count
+                total_deleted_journals += deleted_journals
+                
+                # Delete the campaign itself
+                await campaign.delete()
+                
+                logger.info(f"Campaign {campaign.campaign_id} cleanup completed: {deleted_leads} leads, {deleted_events} events, {deleted_journals} journals")
+                
+            except Exception as e:
+                logger.error(f"Failed to cleanup campaign {campaign.campaign_id}: {e}")
+        
+        logger.info(f"=== AUTOMATIC CLEANUP COMPLETED ===")
+        logger.info(f"Total deleted: {total_deleted_leads} leads, {total_deleted_events} events, {total_deleted_journals} journals")
+        
+        # Also clean up orphaned events and journals (no matching campaign)
+        try:
+            # Find all campaign IDs
+            campaign_ids = await CampaignModel.distinct("campaign_id")
+            
+            # Delete events for non-existent campaigns
+            orphaned_events_result = await LeadEvent.delete_many({
+                "campaign_id": {"$nin": campaign_ids}
+            })
+            
+            # Delete journals for non-existent campaigns
+            orphaned_journals_result = await LeadJournal.delete_many({
+                "campaign_id": {"$nin": campaign_ids}
+            })
+            
+            if orphaned_events_result.deleted_count > 0 or orphaned_journals_result.deleted_count > 0:
+                logger.info(f"Cleaned up {orphaned_events_result.deleted_count} orphaned events and {orphaned_journals_result.deleted_count} orphaned journals")
+                
+        except Exception as e:
+            logger.error(f"Failed to cleanup orphaned data: {e}")
+
+    try:
+        asyncio.run(cleanup())
+    except Exception as e:
+        logger.error(f"=== AUTOMATIC CLEANUP TASK FAILED ===")
+        logger.error(f"Error: {e}", exc_info=True)
         raise

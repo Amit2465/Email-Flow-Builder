@@ -8,6 +8,7 @@ import {
   ReactFlowProvider,
 } from '@xyflow/react';
 import { v4 as uuidv4 } from 'uuid';
+import { ZoomOut } from 'lucide-react';
 import { useFlowStore } from '../../store/flowStore';
 import { StartNode } from '../nodes/StartNode';
 import { SendEmailNode } from '../nodes/SendEmailNode';
@@ -23,7 +24,7 @@ const nodeTypes = {
 
 const FlowCanvasInner: React.FC = () => {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, zoomOut } = useReactFlow();
   
   const {
     nodes,
@@ -120,11 +121,8 @@ const FlowCanvasInner: React.FC = () => {
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
         nodeTypes={nodeTypes}
-        fitView
-        fitViewOptions={{
-          padding: 0.2,
-          includeHiddenNodes: false,
-        }}
+        fitView={false}
+        defaultViewport={{ x: 0, y: 0, zoom: 0.8 }}
         defaultEdgeOptions={{
           animated: true,
           style: { stroke: '#1D4ED8', strokeWidth: 2 },
@@ -141,6 +139,18 @@ const FlowCanvasInner: React.FC = () => {
           className="bg-white border border-gray-200 rounded-lg shadow-sm"
           showInteractive={false}
         />
+        
+        {/* Custom Zoom Out Button */}
+        <div className="absolute top-4 right-4 z-10">
+          <button
+            onClick={() => zoomOut({ duration: 300 })}
+            className="p-2 bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+            title="Zoom Out"
+          >
+            <ZoomOut className="w-4 h-4 text-gray-600" />
+          </button>
+        </div>
+        
         <MiniMap
           className="bg-white border border-gray-200 rounded-lg shadow-sm"
           nodeColor="#E5E7EB"

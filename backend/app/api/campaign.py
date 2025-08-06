@@ -83,6 +83,10 @@ async def create_campaign(campaign_data: CampaignRequest):
             logger.info(f"Campaign ID: {campaign.campaign_id}")
             logger.info("=" * 60)
             
+            # Add a small delay to ensure database consistency
+            import asyncio
+            await asyncio.sleep(0.1)
+            
             # Create FlowExecutor and start execution
             executor = FlowExecutor(campaign.campaign_id)
             result = await executor.start_campaign(campaign_data.contact_file)
@@ -117,3 +121,95 @@ async def create_campaign(campaign_data: CampaignRequest):
 
 # Only essential API: campaign creation (which automatically starts execution)
 # All other endpoints removed - system is fully automatic
+
+@router.delete("/campaigns/{campaign_id}/cleanup")
+async def cleanup_campaign(campaign_id: str):
+    """
+    Clean up completed campaign data including leads, events, and tasks.
+    This endpoint removes old data to prevent database bloat.
+    """
+    try:
+        logger.info(f"[CLEANUP] Starting cleanup for campaign {campaign_id}")
+        
+        # Check if campaign exists and is completed
+        campaign = await CampaignModel.find_one({"campaign_id": campaign_id})
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        if campaign.status != "completed":
+            raise HTTPException(status_code=400, detail="Only completed campaigns can be cleaned up")
+        
+        # Get all leads for this campaign
+        from app.models.lead import LeadModel
+        all_leads = await LeadModel.find({"campaign_id": campaign_id}).to_list()
+        logger.info(f"[CLEANUP] Found {len(all_leads)} leads to clean up")
+        
+        # Clean up leads
+        deleted_leads = 0
+        for lead in all_leads:
+            try:
+                await lead.delete()
+                deleted_leads += 1
+            except Exception as e:
+                logger.error(f"[CLEANUP] Failed to delete lead {lead.lead_id}: {e}")
+        
+        # Clean up events
+        from app.models.lead_event import LeadEvent
+        events = await LeadEvent.find({"campaign_id": campaign_id}).to_list()
+        deleted_events = 0
+        for event in events:
+            try:
+                await event.delete()
+                deleted_events += 1
+            except Exception as e:
+                logger.error(f"[CLEANUP] Failed to delete event {event.event_id}: {e}")
+        
+        # Clean up journal entries
+        from app.models.lead_journal import LeadJournal
+        journal_entries = await LeadJournal.find({"campaign_id": campaign_id}).to_list()
+        deleted_journals = 0
+        for journal in journal_entries:
+            try:
+                await journal.delete()
+                deleted_journals += 1
+            except Exception as e:
+                logger.error(f"[CLEANUP] Failed to delete journal entry {journal.journal_id}: {e}")
+        
+        # Revoke any remaining Celery tasks for this campaign
+        try:
+            from app.celery_config import celery_app
+            from celery.task.control import inspect
+            
+            i = inspect()
+            active_tasks = i.active()
+            
+            if active_tasks:
+                for worker, tasks in active_tasks.items():
+                    for task in tasks:
+                        if campaign_id in str(task.get('args', [])) or campaign_id in str(task.get('kwargs', {})):
+                            try:
+                                celery_app.control.revoke(task['id'], terminate=True)
+                                logger.info(f"[CLEANUP] Revoked task {task['id']} for campaign {campaign_id}")
+                            except Exception as e:
+                                logger.error(f"[CLEANUP] Failed to revoke task {task['id']}: {e}")
+        except Exception as e:
+            logger.error(f"[CLEANUP] Failed to revoke Celery tasks: {e}")
+        
+        logger.info(f"[CLEANUP] Campaign {campaign_id} cleanup completed:")
+        logger.info(f"[CLEANUP] - Deleted {deleted_leads} leads")
+        logger.info(f"[CLEANUP] - Deleted {deleted_events} events")
+        logger.info(f"[CLEANUP] - Deleted {deleted_journals} journal entries")
+        
+        return {
+            "message": "Campaign cleanup completed successfully",
+            "campaign_id": campaign_id,
+            "deleted_leads": deleted_leads,
+            "deleted_events": deleted_events,
+            "deleted_journals": deleted_journals
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[CLEANUP] Campaign cleanup failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Campaign cleanup failed: {str(e)}")

@@ -26,6 +26,9 @@ class LeadModel(Document):
     completed_tasks: List[str] = Field(default_factory=list)  # Track which nodes have been completed with task IDs
     completed_waits: List[str] = Field(default_factory=list)  # Track which wait nodes have been completed
     last_resume_at: Optional[datetime] = None  # Track when the lead was last resumed to prevent duplicate resumes
+    lead_type: str = Field(default="original")  # ✅ NEW: original, yes_branch, no_branch
+    parent_lead_id: Optional[str] = Field(default=None)  # ✅ NEW: For tracking relationships
+    branch_source_node: Optional[str] = Field(default=None)  # ✅ NEW: Which condition created this branch
 
     class Settings:
         name = "leads" 

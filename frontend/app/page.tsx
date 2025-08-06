@@ -6,6 +6,7 @@ import { NodePalette } from "../src/components/sidebar/NodePalette"
 import { FlowCanvas } from "../src/components/canvas/FlowCanvas"
 import { PropertyPanel } from "../src/components/properties/PropertyPanel"
 import { useFlowStore } from "../src/store/flowStore"
+import { Toaster } from "../components/ui/sonner"
 import "@xyflow/react/dist/style.css"
 
 export default function Page() {
@@ -26,6 +27,8 @@ export default function Page() {
 
         {selectedNode && <PropertyPanel />}
       </div>
+      
+      <Toaster />
     </div>
   )
 }

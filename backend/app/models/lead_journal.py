@@ -10,9 +10,9 @@ class LeadJournal(Document):
     """
     lead_id: str = Field(..., index=True)
     campaign_id: str = Field(..., index=True)
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
     message: str
-    node_id: Optional[str] = None
+    node_id: Optional[str] = Field(default=None, index=True)
     node_type: Optional[str] = None
     details: Optional[dict] = None
 

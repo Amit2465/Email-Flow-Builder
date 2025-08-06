@@ -22,4 +22,25 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    # Better error handling and retry settings
+    task_always_eager=False,
+    task_eager_propagates=True,
+    task_ignore_result=False,
+    task_store_errors_even_if_ignored=True,
+    # Retry settings
+    task_default_retry_delay=60,  # 1 minute
+    task_max_retries=3,
+    # Worker settings
+    worker_max_tasks_per_child=1000,
+    worker_disable_rate_limits=False,
+    # Result backend settings
+    result_expires=3600,  # 1 hour
+    # Connection error handling
+    broker_connection_retry_on_startup=True,
+    broker_connection_retry=True,
+    broker_connection_max_retries=10,
+    result_backend_transport_options={
+        'retry_on_timeout': True,
+        'max_retries': 3,
+    }
 )

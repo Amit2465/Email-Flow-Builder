@@ -9,7 +9,7 @@ export const ConnectionTest = () => {
   const testBackendConnection = async () => {
     setLoading(true)
     try {
-      const response = await fetch("http://localhost:8000/test-connection")
+      const response = await fetch("https://ce4bb4e597bb.ngrok-free.app/test-connection")
       if (response.ok) {
         const data = await response.json()
         setStatus(`✅ Backend connected: ${data.message}`)

@@ -14,13 +14,18 @@ RUN apk add --no-cache \
     curl \
     && rm -rf /var/cache/apk/*
 
-# Copy application code first
-COPY . .
+# Copy requirements first for better caching
+# This layer will only rebuild if requirements.txt changes
+COPY requirements.txt .
 
 # Install Python dependencies
-# This ensures that if any code changes, dependencies are re-evaluated
+# This layer will be cached unless requirements.txt changes
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+# This layer will only rebuild if application code changes
+COPY . .
 
 # Create non-root user
 RUN adduser -D appuser \

@@ -9,10 +9,14 @@ export interface FlowNode {
       templateId?: string
       subject?: string
       body?: string
+      links?: Array<{
+        text: string
+        url: string
+      }>
       waitDays?: number
       waitDuration?: number
       waitUnit?: string
-      conditionType?: "open"
+      conditionType?: "open" | "click"
       contactFile?: {
         name: string
         size: number
