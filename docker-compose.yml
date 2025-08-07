@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   mongodb:
     image: mongo:7.0
@@ -15,10 +17,22 @@ services:
       - email-builder-network
     healthcheck:
       test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
-      interval: 10s
+      interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 40s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "3m"
+        max-file: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    command: mongod --wiredTigerCacheSizeGB 0.1 --wiredTigerCollectionBlockCompressor snappy
 
   rabbitmq:
     image: "rabbitmq:3.13-management"
@@ -37,9 +51,20 @@ services:
       - email-builder-network
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "3m"
+        max-file: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
 
   redis:
     image: "redis:alpine"
@@ -50,9 +75,21 @@ services:
       - email-builder-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "3m"
+        max-file: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru --save "" --appendonly no
 
   backend:
     build:
@@ -73,6 +110,17 @@ services:
         condition: service_healthy
     networks:
       - email-builder-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "3m"
+        max-file: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
 
   worker:
     build:
@@ -92,6 +140,17 @@ services:
         condition: service_healthy
     networks:
       - email-builder-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "3m"
+        max-file: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
 
   frontend:
     build:
@@ -106,12 +165,31 @@ services:
         condition: service_started
     networks:
       - email-builder-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "3m"
+        max-file: "1"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
 
 volumes:
   mongodb_data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/mongodb_data
   rabbitmq_data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/rabbitmq_data
 
 networks:
   email-builder-network:
