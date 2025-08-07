@@ -30,7 +30,7 @@ services:
           memory: 256M
         reservations:
           memory: 128M
-    command: mongod --wiredTigerCacheSizeGB 0.1 --wiredTigerCollectionBlockCompressor snappy
+    command: mongod --wiredTigerCacheSizeGB 0.25 --wiredTigerCollectionBlockCompressor snappy
 
   rabbitmq:
     image: "rabbitmq:3.13-management"
