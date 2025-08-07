@@ -11,12 +11,11 @@ import logging
 SECRET_KEY = "your-super-secret-key-that-is-hardcoded"
 
 # The public URL of the API, used for generating tracking links.
-# Using the ngrok URL provided by the user - supports both HTTP and HTTPS
-# ngrok automatically handles both HTTP and HTTPS requests to the same endpoint
-API_PUBLIC_URL = "https://820043592a06.ngrok-free.app"
+# Using the EC2 instance URL - HTTP only for better email compatibility
+API_PUBLIC_URL = "http://35.154.124.182:8000"
 
-# Fallback HTTP URL for compatibility (if HTTPS fails)
-API_PUBLIC_URL_HTTP = "http://820043592a06.ngrok-free.app"
+# Fallback HTTP URL for compatibility (same as primary since we're using HTTP)
+API_PUBLIC_URL_HTTP = "http://35.154.124.182:8000"
 
 def get_tracking_url(endpoint: str, token: str, **params) -> str:
     """Generate tracking URL with protocol fallback support for ngrok"""
@@ -57,11 +56,13 @@ def convert_text_to_html(plain_text: str, links: list, click_token: str = None) 
             text = link.get("text", "").strip()
             url = link.get("url", "").strip()
             if text and url:
-                # For configured buttons, always use the original URL
-                # This ensures buttons go directly to the chosen URL
-                tracking_url = url
+                # Create tracking URL for click link events (dynamic buttons)
+                if click_token:
+                    tracking_url = get_tracking_url("/api/track/click", click_token, url=url)
+                else:
+                    tracking_url = url
                 
-                # Create a styled button for each link
+                # Create a styled button for each link with alias as button text
                 button_html = f'''
                 <div style="margin: 25px 0; text-align: center;">
                     <a href="{tracking_url}" style="
@@ -163,7 +164,7 @@ def send_email_with_tracking(
             
             # Skip tracking for certain URLs (like your own website)
             skip_tracking_domains = [
-                '820043592a06.ngrok-free.app',  # Skip tracking for ngrok URLs
+                '35.154.124.182',  # Skip tracking for EC2 URLs
                 'localhost',
                 '127.0.0.1'
             ]
@@ -292,9 +293,9 @@ def send_email_with_tracking(
             <div class="content">
                 {tracked_body}
                 
-                {f'''<!-- Direct tracking link that closes tab after tracking -->
+                {f'''<!-- Direct tracking link that opens landing page after tracking -->
                 <div style="text-align: center; margin: 30px 0;">
-                    <a href="{get_tracking_url("/api/track/click", click_token, url="about:blank")}" class="tracking-link">Read more...</a>
+                    <a href="{get_tracking_url("/api/track/open", open_token, redirect="/delightloop")}" class="tracking-link">Read more...</a>
                 </div>''' if add_tracking_link else ''}
             </div>
             <div class="footer">

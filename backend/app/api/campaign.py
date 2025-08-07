@@ -132,7 +132,7 @@ async def cleanup_campaign(campaign_id: str):
         logger.info(f"[CLEANUP] Starting cleanup for campaign {campaign_id}")
         
         # Check if campaign exists and is completed
-        campaign = await CampaignModel.find_one({"campaign_id": campaign_id})
+        campaign = await CampaignModel.find_one(CampaignModel.campaign_id == campaign_id)
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
         
@@ -141,7 +141,7 @@ async def cleanup_campaign(campaign_id: str):
         
         # Get all leads for this campaign
         from app.models.lead import LeadModel
-        all_leads = await LeadModel.find({"campaign_id": campaign_id}).to_list()
+        all_leads = await LeadModel.find(LeadModel.campaign_id == campaign_id).to_list()
         logger.info(f"[CLEANUP] Found {len(all_leads)} leads to clean up")
         
         # Clean up leads
@@ -155,7 +155,7 @@ async def cleanup_campaign(campaign_id: str):
         
         # Clean up events
         from app.models.lead_event import LeadEvent
-        events = await LeadEvent.find({"campaign_id": campaign_id}).to_list()
+        events = await LeadEvent.find(LeadEvent.campaign_id == campaign_id).to_list()
         deleted_events = 0
         for event in events:
             try:
@@ -166,7 +166,7 @@ async def cleanup_campaign(campaign_id: str):
         
         # Clean up journal entries
         from app.models.lead_journal import LeadJournal
-        journal_entries = await LeadJournal.find({"campaign_id": campaign_id}).to_list()
+        journal_entries = await LeadJournal.find(LeadJournal.campaign_id == campaign_id).to_list()
         deleted_journals = 0
         for journal in journal_entries:
             try:

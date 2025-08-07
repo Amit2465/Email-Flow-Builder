@@ -50,9 +50,9 @@ def send_email_task(
                 # ✅ CRITICAL: Shorter delay to ensure lead state is properly established
         time.sleep(0.5)
         
-        # ✅ Trigger continuation of the flow
-        logger.info(f"Triggering resume_lead_task for lead {lead_id}")
-        resume_lead_task.delay(lead_id, campaign_id)
+        # ✅ Trigger continuation of the flow (skip event check for email completion)
+        logger.info(f"Triggering resume_lead_task for lead {lead_id} (email completion)")
+        resume_lead_task.delay(lead_id, campaign_id, skip_event_check=True)
         logger.info(f"=== SEND_EMAIL_TASK COMPLETED ===")
 
     except Exception as e:
@@ -64,9 +64,10 @@ def send_email_task(
 
 
 @celery_app.task(name="app.tasks.resume_lead_task", acks_late=True, max_retries=3)
-def resume_lead_task(lead_id: str, campaign_id: str):
+def resume_lead_task(lead_id: str, campaign_id: str, skip_event_check: bool = False):
     """
     Celery task to resume a lead's execution after a WAIT node or EMAIL node.
+    skip_event_check: If True, skip the recent event check (used for email completion resumes)
     """
     from app.services.flow_executor import FlowExecutor
 
@@ -76,34 +77,62 @@ def resume_lead_task(lead_id: str, campaign_id: str):
         logger.info(f"Lead ID: {lead_id}")
         logger.info(f"Campaign ID: {campaign_id}")
         logger.info(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+        logger.info(f"Skip event check: {skip_event_check}")
+        
+        # ✅ CRITICAL: Add detailed logging for task execution
+        logger.info(f"=== TASK EXECUTION DETAILS ===")
+        logger.info(f"Function: resume_lead_task")
+        logger.info(f"Skip event check parameter: {skip_event_check}")
+        logger.info(f"Task ID: {resume_lead_task.request.id if hasattr(resume_lead_task, 'request') else 'unknown'}")
         
         # ✅ CRITICAL FIX: Check if an event has already occurred before resuming
-        from app.models.lead_event import LeadEvent
+        # BUT only if this is not an email completion resume
+        if not skip_event_check:
+            logger.info(f"Checking for recent events (skip_event_check=False)")
+            from app.models.lead_event import LeadEvent
+            from app.models.lead import LeadModel
+            
+            # Check for recent processed events (only if they occurred very recently)
+            recent_event = await LeadEvent.find(
+                LeadEvent.lead_id == lead_id,
+                LeadEvent.campaign_id == campaign_id,
+                LeadEvent.processed == True
+            ).sort(-LeadEvent.processed_at).limit(1).to_list()
+            recent_event = recent_event[0] if recent_event else None
+            
+            logger.info(f"Recent event found: {recent_event.event_type if recent_event else 'None'}")
+            
+            if recent_event:
+                # Only skip if the event occurred in the last 10 seconds (very recent)
+                # This prevents skipping during normal campaign execution
+                from datetime import timedelta
+                # Ensure both datetimes are timezone-aware for comparison
+                current_time = datetime.now(timezone.utc)
+                processed_time = recent_event.processed_at
+                if processed_time.tzinfo is None:
+                    # Make timezone-naive datetime timezone-aware (assume UTC)
+                    processed_time = processed_time.replace(tzinfo=timezone.utc)
+                event_age = current_time - processed_time
+                if event_age < timedelta(seconds=10):
+                    logger.info(f"Recent event occurred for lead {lead_id}, skipping resume_lead_task to prevent duplicates")
+                    logger.info(f"Recent event: {recent_event.event_type} at {recent_event.processed_at} (age: {event_age})")
+                    return
+                else:
+                    logger.info(f"Event occurred but is old ({event_age}), allowing resume_lead_task to continue")
+        else:
+            logger.info(f"Skipping event check for email completion resume")
+            
         from app.models.lead import LeadModel
         
-        # Check for recent processed events (only if they occurred very recently)
-        recent_event = await LeadEvent.find_one({
-            "lead_id": lead_id,
-            "campaign_id": campaign_id,
-            "processed": True
-        }, sort=[("processed_at", -1)])
-        
-        if recent_event:
-            # Only skip if the event occurred in the last 10 seconds (very recent)
-            # This prevents skipping during normal campaign execution
-            from datetime import timedelta
-            event_age = datetime.now(timezone.utc) - recent_event.processed_at
-            if event_age < timedelta(seconds=10):
-                logger.info(f"Recent event occurred for lead {lead_id}, skipping resume_lead_task to prevent duplicates")
-                logger.info(f"Recent event: {recent_event.event_type} at {recent_event.processed_at} (age: {event_age})")
-                return
-            else:
-                logger.info(f"Event occurred but is old ({event_age}), allowing resume_lead_task to continue")
-        
         # Check if lead is already being processed by condition task
-        lead = await LeadModel.find_one({"lead_id": lead_id, "campaign_id": campaign_id})
+        lead = await LeadModel.find_one(LeadModel.lead_id == lead_id, LeadModel.campaign_id == campaign_id)
         if lead and lead.status == "running":
             logger.info(f"Lead {lead_id} is already running, skipping resume_lead_task")
+            return
+            
+        # ✅ CRITICAL: Check if lead has been moved to YES branch (prevent NO branch resumes)
+        if lead and "SWITCHED_TO_YES" in lead.execution_path:
+            logger.info(f"Lead {lead_id} has been moved to YES branch, skipping NO branch resume_lead_task")
             return
         
         executor = FlowExecutor(campaign_id)
@@ -147,11 +176,12 @@ def resume_condition_task(lead_id: str, campaign_id: str, condition_met: bool = 
             
             # Get the most recent processed event for this lead
             from app.models.lead_event import LeadEvent
-            recent_event = await LeadEvent.find_one({
-                "lead_id": lead_id,
-                "campaign_id": campaign_id,
-                "processed": True
-            }, sort=[("processed_at", -1)])
+            recent_event = await LeadEvent.find(
+                LeadEvent.lead_id == lead_id,
+                LeadEvent.campaign_id == campaign_id,
+                LeadEvent.processed == True
+            ).sort(-LeadEvent.processed_at).limit(1).to_list()
+            recent_event = recent_event[0] if recent_event else None
             
             if recent_event:
                 logger.info(f"Found recent event for condition node: {recent_event.condition_node_id}")
@@ -159,7 +189,7 @@ def resume_condition_task(lead_id: str, campaign_id: str, condition_met: bool = 
                 
                 # ✅ CRITICAL FIX: Cancel any pending resume_lead_task to prevent duplicates
                 from app.models.lead import LeadModel
-                lead = await LeadModel.find_one({"lead_id": lead_id, "campaign_id": campaign_id})
+                lead = await LeadModel.find_one(LeadModel.lead_id == lead_id, LeadModel.campaign_id == campaign_id)
                 if lead and lead.scheduled_task_id:
                     try:
                         from app.celery_config import celery_app
@@ -288,17 +318,17 @@ def cleanup_old_data_task():
                 logger.info(f"Cleaning up campaign {campaign.campaign_id}")
                 
                 # Delete leads
-                leads_result = await LeadModel.delete_many({"campaign_id": campaign.campaign_id})
+                leads_result = await LeadModel.find(LeadModel.campaign_id == campaign.campaign_id).delete()
                 deleted_leads = leads_result.deleted_count
                 total_deleted_leads += deleted_leads
                 
                 # Delete events
-                events_result = await LeadEvent.delete_many({"campaign_id": campaign.campaign_id})
+                events_result = await LeadEvent.find(LeadEvent.campaign_id == campaign.campaign_id).delete()
                 deleted_events = events_result.deleted_count
                 total_deleted_events += deleted_events
                 
                 # Delete journal entries
-                journals_result = await LeadJournal.delete_many({"campaign_id": campaign.campaign_id})
+                journals_result = await LeadJournal.find(LeadJournal.campaign_id == campaign.campaign_id).delete()
                 deleted_journals = journals_result.deleted_count
                 total_deleted_journals += deleted_journals
                 
@@ -319,14 +349,14 @@ def cleanup_old_data_task():
             campaign_ids = await CampaignModel.distinct("campaign_id")
             
             # Delete events for non-existent campaigns
-            orphaned_events_result = await LeadEvent.delete_many({
-                "campaign_id": {"$nin": campaign_ids}
-            })
+            orphaned_events_result = await LeadEvent.find(
+                LeadEvent.campaign_id.not_in(campaign_ids)
+            ).delete()
             
             # Delete journals for non-existent campaigns
-            orphaned_journals_result = await LeadJournal.delete_many({
-                "campaign_id": {"$nin": campaign_ids}
-            })
+            orphaned_journals_result = await LeadJournal.find(
+                LeadJournal.campaign_id.not_in(campaign_ids)
+            ).delete()
             
             if orphaned_events_result.deleted_count > 0 or orphaned_journals_result.deleted_count > 0:
                 logger.info(f"Cleaned up {orphaned_events_result.deleted_count} orphaned events and {orphaned_journals_result.deleted_count} orphaned journals")

@@ -14,6 +14,9 @@ from app.tasks import send_email_task, resume_lead_task, resume_condition_task
 logger = logging.getLogger(__name__)
 
 class FlowExecutor:
+    # Class-level variables for global protection
+    _global_email_sends = set()  # Global email send protection
+    
     def __init__(self, campaign_id: str):
         self.campaign_id = campaign_id
         self.campaign: Optional[CampaignModel] = None
@@ -22,6 +25,8 @@ class FlowExecutor:
         self.execution_id = str(uuid.uuid4())[:8]
         self._execution_locks = set()  # Prevent duplicate execution
         self._lock_timestamps = {}  # Track when locks were created
+        self._email_sends = set()  # Track email sending to prevent duplicates
+        self._branch_switches = set()  # Track branch switches to prevent duplicates
 
     def _log_flow(self, lead_id: str, message: str, level: str = "info", **kwargs):
         """Structured logging for flow execution"""
@@ -98,7 +103,7 @@ class FlowExecutor:
 
     async def load_campaign(self):
         logger.info(f"[CAMPAIGN_LOAD] Attempting to load campaign {self.campaign_id}")
-        self.campaign = await CampaignModel.find_one({"campaign_id": self.campaign_id})
+        self.campaign = await CampaignModel.find_one(CampaignModel.campaign_id == self.campaign_id)
         
         if not self.campaign:
             logger.error(f"[CAMPAIGN_LOAD] Campaign {self.campaign_id} not found in database")
@@ -354,7 +359,7 @@ class FlowExecutor:
             # ✅ CRITICAL: Reload leads from database to get fresh state
             fresh_leads = []
             for lead in leads:
-                fresh_lead = await LeadModel.find_one({"lead_id": lead.lead_id})
+                fresh_lead = await LeadModel.find_one(LeadModel.lead_id == lead.lead_id)
                 if fresh_lead:
                     fresh_leads.append(fresh_lead)
                 else:
@@ -427,7 +432,7 @@ class FlowExecutor:
                 self._log_flow(lead.lead_id, "Updating status from pending to running", level="info")
                 await self._update_lead_status(lead, "running", "Lead execution started.")
                 # ✅ CRITICAL: Reload lead to get updated status
-                lead = await LeadModel.find_one({"lead_id": lead.lead_id})
+                lead = await LeadModel.find_one(LeadModel.lead_id == lead.lead_id)
                 if not lead:
                     self._log_flow(lead.lead_id, "Failed to reload lead from database", level="error")
                     return
@@ -472,9 +477,14 @@ class FlowExecutor:
                 self._log_flow(lead.lead_id, f"=== EXECUTION STEP {execution_count} ===", level="info")
                 self._log_flow(lead.lead_id, f"Current node: {current_node_id}", level="info")
                 
+                # Check if lead is paused before executing (only if not running)
+                if lead.status != "running":
+                    self._log_flow(lead.lead_id, f"Lead status is {lead.status}, stopping execution", level="info")
+                    break
+                
                 # Check if lead was paused during execution
                 try:
-                    fresh_lead = await LeadModel.find_one({"lead_id": lead.lead_id})
+                    fresh_lead = await LeadModel.find_one(LeadModel.lead_id == lead.lead_id)
                     if fresh_lead and fresh_lead.status != "running":
                         self._log_flow(lead.lead_id, f"Lead status changed to {fresh_lead.status}, stopping execution", level="info")
                         break
@@ -487,13 +497,25 @@ class FlowExecutor:
                 result = await self._execute_single_node(current_node_id, lead)
                 self._log_flow(lead.lead_id, f"Node execution result: {result}", level="info")
                 
+                # Check lead status after node execution (only for pause detection)
+                try:
+                    fresh_lead = await LeadModel.find_one(LeadModel.lead_id == lead.lead_id)
+                    if fresh_lead and fresh_lead.status == "paused":
+                        self._log_flow(lead.lead_id, f"Lead status changed to paused after node execution", level="info")
+                        lead = fresh_lead
+                        break
+                except Exception as status_error:
+                    self._log_flow(lead.lead_id, f"Failed to check lead status: {status_error}", level="warning")
+                
                 if result["status"] == "completed":
                     # Node completed successfully, move to next
                     current_node_id = result.get("next_node")
+                    self._log_flow(lead.lead_id, f"DEBUG: Node completed, moving from {lead.current_node} to {current_node_id}", level="info")
                     # ✅ FIXED: Update lead's current_node to reflect the new position
                     if current_node_id:
                         lead.current_node = current_node_id
                         await lead.save()
+                        self._log_flow(lead.lead_id, f"DEBUG: Lead current_node updated to {current_node_id}", level="info")
                 elif result["status"] == "condition_met":
                     # ✅ FIXED: Original lead continues NO path, YES path triggers in parallel
                     yes_node_id = self._get_next_node_id(current_node_id, "yes")
@@ -541,8 +563,22 @@ class FlowExecutor:
                             break
                 elif result["status"] == "paused":
                     # Node paused (email/wait/condition), execution will resume via Celery
+                    self._log_flow(lead.lead_id, f"=== FLOW PAUSED - STOPPING EXECUTION ===", level="info")
                     self._log_flow(lead.lead_id, f"Flow paused at node {current_node_id}", level="info")
-                    break
+                    self._log_flow(lead.lead_id, f"Lead status: {lead.status}", level="info")
+                    self._log_flow(lead.lead_id, f"Lead wait_until: {lead.wait_until}", level="info")
+                    self._log_flow(lead.lead_id, f"Lead scheduled_task_id: {lead.scheduled_task_id}", level="info")
+                    self._log_flow(lead.lead_id, f"Execution will resume via Celery task", level="info")
+                    
+                    # ✅ CRITICAL: Update lead status to paused and save
+                    lead.status = "paused"
+                    await lead.save()
+                    self._log_flow(lead.lead_id, f"Lead status updated to paused and saved", level="info")
+                    
+                    # ✅ CRITICAL: Don't break - let the Celery task handle resumption
+                    # The flow will resume from the next node when the Celery task executes
+                    self._log_flow(lead.lead_id, f"Flow paused - will resume via Celery task", level="info")
+                    return  # Return instead of break to allow Celery to resume
                 elif result["status"] == "failed":
                     # Node failed, stop execution
                     await self._update_lead_status(lead, "failed", result.get("message", "Node execution failed"))
@@ -578,10 +614,40 @@ class FlowExecutor:
             self._log_flow(lead.lead_id, f"Executing node {node_id} of type {node_type}", level="info", node_id=node_id, node_type=node_type)
             
             # Check if node is already completed to prevent duplicates
+            self._log_flow(lead.lead_id, f"=== NODE COMPLETION CHECK ===", level="info")
+            self._log_flow(lead.lead_id, f"Checking if node {node_id} is already completed", level="info")
+            self._log_flow(lead.lead_id, f"Current completed_tasks: {lead.completed_tasks}", level="info")
+            self._log_flow(lead.lead_id, f"Current completed_waits: {lead.completed_waits}", level="info")
+            self._log_flow(lead.lead_id, f"Node type: {node_type}", level="info")
+            
+            # Check if node is already completed
             if node_id in lead.completed_tasks:
-                self._log_flow(lead.lead_id, f"Node {node_id} already completed, skipping", level="info")
+                self._log_flow(lead.lead_id, f"❌ NODE SKIP: Node {node_id} already in completed_tasks, skipping execution", level="warning")
                 next_node_id = self._get_next_node_id(node_id)
+                self._log_flow(lead.lead_id, f"Returning completed status with next_node: {next_node_id}", level="info")
                 return {"status": "completed", "next_node": next_node_id}
+            
+            # Check if wait node is already completed
+            if node_type == "wait" and node_id in lead.completed_waits:
+                self._log_flow(lead.lead_id, f"❌ WAIT NODE SKIP: Wait node {node_id} already in completed_waits, skipping execution", level="warning")
+                next_node_id = self._get_next_node_id(node_id)
+                self._log_flow(lead.lead_id, f"Returning completed status with next_node: {next_node_id}", level="info")
+                return {"status": "completed", "next_node": next_node_id}
+            
+            # ✅ CRITICAL: Check if this is a fresh execution after branch switch
+            # If lead has SWITCHED_TO_YES in execution_path, we need to re-execute wait nodes
+            if node_type == "wait" and "SWITCHED_TO_YES" in lead.execution_path:
+                self._log_flow(lead.lead_id, f"🔄 BRANCH SWITCH DETECTED: Re-executing wait node {node_id} after branch switch", level="info")
+                # Remove from completed_waits to allow re-execution
+                if node_id in lead.completed_waits:
+                    lead.completed_waits.remove(node_id)
+                    self._log_flow(lead.lead_id, f"Removed {node_id} from completed_waits for re-execution", level="info")
+                    await lead.save()
+                # ✅ CRITICAL: Also remove from completed_tasks to prevent duplicate execution
+                if node_id in lead.completed_tasks:
+                    lead.completed_tasks.remove(node_id)
+                    self._log_flow(lead.lead_id, f"Removed {node_id} from completed_tasks for re-execution", level="info")
+                    await lead.save()
             
             # Mark node as being executed (atomic operation)
             self._log_flow(lead.lead_id, f"Marking node {node_id} as executing", level="debug")
@@ -609,7 +675,7 @@ class FlowExecutor:
         """Atomically mark a node as being executed to prevent duplicates"""
         try:
             # Reload lead to get fresh state and prevent race conditions
-            fresh_lead = await LeadModel.find_one({"lead_id": lead.lead_id})
+            fresh_lead = await LeadModel.find_one(LeadModel.lead_id == lead.lead_id)
             if fresh_lead:
                 lead = fresh_lead
             
@@ -632,10 +698,10 @@ class FlowExecutor:
         connections = self.connections.get(current_node_id, [])
         
         # Debug logging
-        if branch in ["yes", "no"]:
-            self._log_flow("system", f"Looking for {branch} branch for node {current_node_id}", level="debug")
-            self._log_flow("system", f"Available connections: {[c.get('id', '') for c in connections]}", level="debug")
-            self._log_flow("system", f"Connection details: {connections}", level="debug")
+        if branch in ["yes", "no"] or branch == "default":
+            self._log_flow("system", f"DEBUG: Looking for {branch} branch for node {current_node_id}", level="info")
+            self._log_flow("system", f"DEBUG: Available connections: {[c.get('id', '') for c in connections]}", level="info")
+            self._log_flow("system", f"DEBUG: Connection details: {connections}", level="info")
         
         # First try to find by connection_type
         for conn in connections:
@@ -748,64 +814,108 @@ class FlowExecutor:
             if node["id"] in lead.sent_emails:
                 self._log_flow(lead.lead_id, f"Email node {node['id']} already sent, skipping", level="warning")
                 next_node_id = self._get_next_node_id(node["id"])
+                self._log_flow(lead.lead_id, f"DEBUG: Email skip - returning next_node: {next_node_id}", level="info")
                 return {"status": "completed", "next_node": next_node_id}
             
-            # ✅ ATOMIC OPERATION: Mark as sent and paused IMMEDIATELY
-            lead.sent_emails.append(node["id"])
-            lead.email_sent_count += 1
-            lead.last_email_sent_at = datetime.now(timezone.utc)
-            lead.status = "paused"  # Pause for Celery task
+            # ✅ ENHANCED ATOMIC OPERATION: Mark as sent and paused IMMEDIATELY with stronger locking
+            email_send_key = f"email_send_{lead.lead_id}_{node['id']}"
+            
+            # ✅ GLOBAL EMAIL LOCK: Use class-level protection to prevent ANY duplicate emails
+            if not hasattr(FlowExecutor, '_global_email_sends'):
+                FlowExecutor._global_email_sends = set()
+                
+            if email_send_key in FlowExecutor._global_email_sends:
+                self._log_flow(lead.lead_id, f"Email {node['id']} already being sent globally, skipping duplicate", level="warning")
+                next_node_id = self._get_next_node_id(node["id"])
+                return {"status": "completed", "next_node": next_node_id}
+            
+            # Add to both instance and global protection
+            if not hasattr(self, '_email_sends'):
+                self._email_sends = set()
+            
+            self._email_sends.add(email_send_key)
+            FlowExecutor._global_email_sends.add(email_send_key)
+            
+            try:
+                lead.sent_emails.append(node["id"])
+                lead.email_sent_count += 1
+                lead.last_email_sent_at = datetime.now(timezone.utc)
+                lead.status = "paused"  # Pause for Celery task
 
-            # ✅ CRITICAL: Save IMMEDIATELY to establish atomic state
-            await lead.save()
-            await asyncio.sleep(0.5)  # Longer delay to ensure atomic state is fully established
+                # ✅ CRITICAL: Save IMMEDIATELY to establish atomic state
+                await lead.save()
+                await asyncio.sleep(0.5)  # Longer delay to ensure atomic state is fully established
+                
+                self._log_flow(lead.lead_id, f"Email {node['id']} marked as sent atomically", level="info")
+                
+                # Get links from email node configuration
+                email_links = config.get("links", [])
+                valid_links = [link for link in email_links if link.get("text") and link.get("url")]
+                
+                # Check if next node is a condition node that needs email tracking
+                next_node_id = self._get_next_node_id(node["id"])
+                add_tracking_link = False
+                
+                if next_node_id:
+                    next_node = self.nodes.get(next_node_id)
+                    if next_node and next_node.get("type") == "condition":
+                        condition_config = next_node.get("configuration", {})
+                        condition_type = condition_config.get("conditionType")
+                        if condition_type == "open":
+                            add_tracking_link = True
+                            self._log_flow(lead.lead_id, f"Email node {node['id']} followed by email tracking condition, adding tracking link", level="info")
             
-            # Get links from email node configuration
-            email_links = config.get("links", [])
-            valid_links = [link for link in email_links if link.get("text") and link.get("url")]
-            
-            # Check if next node is a condition node that needs email tracking
-            next_node_id = self._get_next_node_id(node["id"])
-            add_tracking_link = False
-            
-            if next_node_id:
-                next_node = self.nodes.get(next_node_id)
-                if next_node and next_node.get("type") == "condition":
-                    condition_config = next_node.get("configuration", {})
-                    condition_type = condition_config.get("conditionType")
-                    if condition_type == "open":
-                        add_tracking_link = True
-                        self._log_flow(lead.lead_id, f"Email node {node['id']} followed by email tracking condition, adding tracking link", level="info")
-            
-            # Dispatch email task
-            task_params = {
-                "lead_id": lead.lead_id,
-                "campaign_id": self.campaign_id,
-                "subject": subject,
-                "body": body,
-                "recipient_email": lead.email,
-                "node_id": node["id"],
-                "links": valid_links,
-                "add_tracking_link": add_tracking_link
-            }
-            
-            task = send_email_task.delay(**task_params)
-            
-            self._log_flow(lead.lead_id, f"Email task dispatched for node {node['id']}", level="info", 
-                          node_id=node["id"], task_id=task.id, subject=subject)
-            
-            await self._add_journal_entry(lead.lead_id, "Email task dispatched and lead paused.", 
-                                        node_id=node["id"], details={"task_id": task.id, "subject": subject})
-            
-            return {"status": "paused", "message": "Email task dispatched"}
+                # Dispatch email task
+                task_params = {
+                    "lead_id": lead.lead_id,
+                    "campaign_id": self.campaign_id,
+                    "subject": subject,
+                    "body": body,
+                    "recipient_email": lead.email,
+                    "node_id": node["id"],
+                    "links": valid_links,
+                    "add_tracking_link": add_tracking_link
+                }
+                
+                task = send_email_task.delay(**task_params)
+                
+                self._log_flow(lead.lead_id, f"Email task dispatched for node {node['id']}", level="info", 
+                              node_id=node["id"], task_id=task.id, subject=subject)
+                
+                await self._add_journal_entry(lead.lead_id, "Email task dispatched and lead paused.", 
+                                            node_id=node["id"], details={"task_id": task.id, "subject": subject})
+                
+                return {"status": "paused", "message": "Email task dispatched"}
+                
+            finally:
+                # Always remove the email send locks (both instance and global)
+                self._email_sends.discard(email_send_key)
+                if hasattr(FlowExecutor, '_global_email_sends'):
+                    FlowExecutor._global_email_sends.discard(email_send_key)
+                self._log_flow(lead.lead_id, f"Released email send locks: {email_send_key}", level="debug")
             
         except Exception as e:
             return {"status": "failed", "message": f"Email node execution failed: {str(e)}"}
 
     async def _execute_wait_node(self, lead: LeadModel, node: dict) -> Dict[str, Any]:
         """Execute wait node - schedule resume task and pause"""
+        # ✅ CRITICAL: Global execution lock to prevent duplicate wait execution
+        wait_execution_key = f"{lead.lead_id}_{node['id']}"
+        if wait_execution_key in self._execution_locks:
+            self._log_flow(lead.lead_id, f"⚠️ WAIT NODE ALREADY EXECUTING: {node['id']} is already being processed", level="warning", node_id=node["id"])
+            return {"status": "duplicate_prevented", "message": "Wait node already being executed"}
+        
+        self._execution_locks.add(wait_execution_key)
+        self._log_flow(lead.lead_id, f"🔒 WAIT NODE LOCK ACQUIRED: {node['id']}", level="info", node_id=node["id"])
+        
         try:
-            self._log_flow(lead.lead_id, f"Starting wait node execution: {node['id']}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"=== WAIT NODE EXECUTION STARTED ===", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Wait node ID: {node['id']}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Lead current_node before wait: {lead.current_node}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Lead status before wait: {lead.status}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Lead completed_tasks before wait: {lead.completed_tasks}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Lead completed_waits before wait: {lead.completed_waits}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Lead execution_path before wait: {lead.execution_path}", level="info", node_id=node["id"])
             
             config = node.get("configuration", {})
             wait_duration = config.get("waitDuration")
@@ -850,25 +960,60 @@ class FlowExecutor:
             self._log_flow(lead.lead_id, f"Wait node next node: {next_node_id}", level="debug", node_id=node["id"])
             
             # Prevent duplicate wait execution
+            self._log_flow(lead.lead_id, f"Checking if wait node {node['id']} is already completed", level="debug", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Current completed_waits: {lead.completed_waits}", level="debug", node_id=node["id"])
             if node["id"] in lead.completed_waits:
-                self._log_flow(lead.lead_id, f"Wait node {node['id']} already completed, skipping", level="warning", node_id=node["id"])
+                self._log_flow(lead.lead_id, f"=== WAIT NODE ALREADY COMPLETED - SKIPPING ===", level="warning", node_id=node["id"])
+                self._log_flow(lead.lead_id, f"Wait node {node['id']} already in completed_waits, skipping execution", level="warning", node_id=node["id"])
+                self._log_flow(lead.lead_id, f"Returning completed status with next_node: {next_node_id}", level="info", node_id=node["id"])
                 return {"status": "completed", "next_node": next_node_id}
             
+            # ✅ CRITICAL: Check if this is a fresh execution after branch switch
+            # If lead has SWITCHED_TO_YES in execution_path, we need to re-execute wait nodes
+            if "SWITCHED_TO_YES" in lead.execution_path:
+                self._log_flow(lead.lead_id, f"🔄 BRANCH SWITCH DETECTED: Re-executing wait node {node['id']} after branch switch", level="info", node_id=node["id"])
+                # Remove from completed_waits to allow re-execution
+                if node["id"] in lead.completed_waits:
+                    lead.completed_waits.remove(node["id"])
+                    self._log_flow(lead.lead_id, f"Removed {node['id']} from completed_waits for re-execution", level="info", node_id=node["id"])
+                    await lead.save()
+                # ✅ CRITICAL: Also remove from completed_tasks to prevent duplicate execution
+                if node["id"] in lead.completed_tasks:
+                    lead.completed_tasks.remove(node["id"])
+                    self._log_flow(lead.lead_id, f"Removed {node['id']} from completed_tasks for re-execution", level="info", node_id=node["id"])
+                    await lead.save()
+            
             # Mark as waiting and pause
+            self._log_flow(lead.lead_id, f"=== UPDATING LEAD STATE FOR WAIT ===", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Adding {node['id']} to completed_waits", level="info", node_id=node["id"])
+            
+            # ✅ CRITICAL: Double-check we haven't already processed this wait node
+            if node["id"] in lead.completed_waits:
+                self._log_flow(lead.lead_id, f"⚠️ WAIT NODE ALREADY PROCESSED: {node['id']} already in completed_waits, skipping", level="warning", node_id=node["id"])
+                return {"status": "completed", "next_node": next_node_id}
+            
             lead.completed_waits.append(node["id"])
             lead.next_node = next_node_id  # Store next node for resume
             lead.wait_until = eta
             lead.status = "paused"
 
-            self._log_flow(lead.lead_id, f"Updated lead status to paused, next_node={next_node_id}, wait_until={eta.isoformat()}", level="debug", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Lead state after wait update:", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"  - completed_waits: {lead.completed_waits}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"  - next_node: {lead.next_node}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"  - wait_until: {lead.wait_until}", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"  - status: {lead.status}", level="info", node_id=node["id"])
 
             # Schedule resume task
             self._log_flow(lead.lead_id, f"Scheduling Celery task for resume at {eta.isoformat()}", level="info", node_id=node["id"])
             task = resume_lead_task.apply_async(args=[lead.lead_id, self.campaign_id], eta=eta)
             lead.scheduled_task_id = task.id
             
+            # ✅ CRITICAL: Add delay to ensure task is properly registered
+            await asyncio.sleep(0.1)
+            self._log_flow(lead.lead_id, f"Task scheduled with ID: {task.id}", level="info", node_id=node["id"])
+            
             self._log_flow(lead.lead_id, f"Celery task scheduled: {task.id}", level="debug", node_id=node["id"])
-                        
+            
             await lead.save()
             self._log_flow(lead.lead_id, f"Lead saved with paused status and scheduled task", level="debug", node_id=node["id"])
 
@@ -878,11 +1023,18 @@ class FlowExecutor:
             await self._add_journal_entry(lead.lead_id, f"Paused for {wait_duration} {wait_unit} until {eta.isoformat()}", 
                                         node_id=node["id"], details={"resume_task": task.id})
             
+            self._log_flow(lead.lead_id, f"=== WAIT NODE EXECUTION COMPLETED ===", level="info", node_id=node["id"])
+            self._log_flow(lead.lead_id, f"Returning paused status for {wait_duration} {wait_unit}", level="info", node_id=node["id"])
+            
             return {"status": "paused", "message": f"Waiting for {wait_duration} {wait_unit}"}
             
         except Exception as e:
             self._log_flow(lead.lead_id, f"Wait node execution failed: {str(e)}", level="error", node_id=node["id"])
             return {"status": "failed", "message": f"Wait node execution failed: {str(e)}"}
+        finally:
+            # ✅ CRITICAL: Always release the execution lock
+            self._execution_locks.discard(wait_execution_key)
+            self._log_flow(lead.lead_id, f"🔓 WAIT NODE LOCK RELEASED: {node['id']}", level="info", node_id=node["id"])
 
     async def _execute_condition_node(self, lead: LeadModel, node: dict) -> Dict[str, Any]:
         """Execute condition node - NO branch runs automatically as timeout mechanism"""
@@ -931,19 +1083,18 @@ class FlowExecutor:
             self._log_flow(lead.lead_id, f"Checking for existing event: type={condition_type}, existing={existing_event}", level="debug", node_id=node["id"])
             
             if existing_event:
-                # Event already happened, but don't execute YES path here
-                # Let the resume_lead_from_condition handle it to avoid duplicates
-                self._log_flow(lead.lead_id, f"Event already occurred, but skipping execution to avoid duplicates", level="info", node_id=node["id"])
-                await self._add_journal_entry(lead.lead_id, f"Event already occurred - will be handled by resume function", node_id=node["id"])
+                # Event already occurred - immediately execute YES branch
+                self._log_flow(lead.lead_id, f"Event already occurred: {existing_event.event_type} - taking YES branch immediately", level="info", node_id=node["id"])
+                await self._add_journal_entry(lead.lead_id, f"Event already occurred ({existing_event.event_type}) - taking YES branch", node_id=node["id"])
                 
-                # ✅ DEBUG: Check if we're already executing this condition
-                execution_key = f"{lead.lead_id}_{node['id']}"
-                if execution_key in self._execution_locks:
-                    logger.warning(f"[DUPLICATE_PREVENTION] Condition execution already in progress for {execution_key}, skipping")
-                    return {"status": "duplicate_prevented", "message": "Execution already in progress"}
-                
-                # Just return success without executing YES path
-                return {"status": "event_exists", "message": "Event already occurred, will be handled by resume function"}
+                # Get YES branch and execute immediately
+                yes_node_id = self._get_next_node_id(node["id"], "yes")
+                if yes_node_id:
+                    self._log_flow(lead.lead_id, f"YES branch node found: {yes_node_id} - executing immediately", level="info", node_id=node["id"])
+                    return {"status": "completed", "next_node": yes_node_id}
+                else:
+                    self._log_flow(lead.lead_id, f"ERROR: No YES branch node found for condition {node['id']}", level="error", node_id=node["id"])
+                    return {"status": "failed", "message": "No YES branch node found for condition"}
             
             # ✅ ENHANCED: Create waiting event with full email context
             # ✅ FIXED: Ensure correct event type based on condition type
@@ -993,18 +1144,19 @@ class FlowExecutor:
             if condition_type == "click" and link_url:
                 self._log_flow(lead.lead_id, f"Waiting for click on URL: {link_url}", level="info", node_id=node["id"])
             
-            # ✅ UPDATED: NO branch executes automatically as timeout mechanism
-            self._log_flow(lead.lead_id, f"NO branch executes automatically as timeout mechanism", level="info", node_id=node["id"])
-            await self._add_journal_entry(lead.lead_id, f"NO branch started automatically - waiting for event to trigger YES path", node_id=node["id"])
+            # ✅ CORRECTED: Condition node should immediately execute NO branch while waiting for events
+            # If event occurs later, lead will be moved from NO branch to YES branch
+            self._log_flow(lead.lead_id, f"Condition node created waiting event - executing NO branch immediately", level="info", node_id=node["id"])
+            await self._add_journal_entry(lead.lead_id, f"Waiting for {condition_type} event - executing NO branch", node_id=node["id"])
             
-            # Get the NO path node and execute it immediately
+            # Get NO branch and execute immediately
             no_node_id = self._get_next_node_id(node["id"], "no")
             if no_node_id:
-                self._log_flow(lead.lead_id, f"NO path node found: {no_node_id} - executing immediately", level="info", node_id=node["id"])
-                return {"status": "no_branch_executing", "message": "NO branch executing as timeout mechanism", "next_node": no_node_id}
+                self._log_flow(lead.lead_id, f"NO branch node found: {no_node_id} - executing immediately", level="info", node_id=node["id"])
+                return {"status": "completed", "next_node": no_node_id}
             else:
-                self._log_flow(lead.lead_id, f"ERROR: No NO path node found for condition {node['id']}", level="error", node_id=node["id"])
-                return {"status": "failed", "message": "No NO path node found for condition"}
+                self._log_flow(lead.lead_id, f"ERROR: No NO branch node found for condition {node['id']}", level="error", node_id=node["id"])
+                return {"status": "failed", "message": "No NO branch node found for condition"}
             
         except Exception as e:
             return {"status": "failed", "message": f"Condition node execution failed: {str(e)}"}
@@ -1037,10 +1189,21 @@ class FlowExecutor:
             self._log_flow(lead_id, f"Condition met: {condition_met}", level="info")
             self._log_flow(lead_id, f"Timestamp: {datetime.now(timezone.utc).isoformat()}", level="info")
             
+            # ✅ CRITICAL: Add detailed logging for task resumption
+            self._log_flow(lead_id, f"=== TASK RESUMPTION DETAILS ===", level="info")
+            self._log_flow(lead_id, f"Function: resume_lead", level="info")
+            self._log_flow(lead_id, f"Condition met parameter: {condition_met}", level="info")
+            
             await self.load_campaign()
+            
+            # ✅ CRITICAL: Check campaign status after loading
+            if self.campaign:
+                self._log_flow(lead_id, f"Campaign status: {self.campaign.get('status', 'unknown')}", level="info")
+            else:
+                self._log_flow(lead_id, f"Campaign not loaded properly", level="error")
             self._log_flow(lead_id, "Campaign loaded successfully", level="debug")
             
-            lead = await LeadModel.find_one({"lead_id": lead_id, "campaign_id": self.campaign_id})
+            lead = await LeadModel.find_one(LeadModel.lead_id == lead_id, LeadModel.campaign_id == self.campaign_id)
 
             if not lead:
                 self._log_flow(lead_id, "Lead not found in database", level="error")
@@ -1094,6 +1257,8 @@ class FlowExecutor:
                 lead.current_node = next_node_id
                 await lead.save()
                 self._log_flow(lead_id, f"Wait resume: moved to next node {next_node_id}", level="info")
+                
+                # ✅ CRITICAL: Continue flow execution from the next node
                 await self._execute_flow_from_current_node(lead)
                     
             elif node_type == "condition":
@@ -1120,7 +1285,9 @@ class FlowExecutor:
             elif node_type == "sendEmail":
                 # ✅ FIXED: Email nodes are completed, not resumed - move to next node
                 self._log_flow(lead_id, f"Email node completed, moving to next node", level="info")
+                self._log_flow(lead_id, f"DEBUG: paused_node_id = {paused_node_id}, lead.current_node = {lead.current_node}", level="info")
                 next_node_id = self._get_next_node_id(paused_node_id)
+                self._log_flow(lead_id, f"DEBUG: next_node_id from {paused_node_id} = {next_node_id}", level="info")
                 
                 if not next_node_id:
                     self._log_flow(lead_id, "Flow completed (no next node after email)", level="info")
@@ -1166,130 +1333,273 @@ class FlowExecutor:
         except Exception as e:
             self._log_flow(lead_id, "=== RESUME LEAD OPERATION FAILED ===", level="error")
             self._log_flow(lead_id, f"Error: {str(e)}", level="error")
+            logger.error(f"[RESUME_LEAD] Failed to resume lead {lead_id}: {e}", exc_info=True)
+            
+            # ✅ CRITICAL: Try to recover by loading campaign again
+            try:
+                self._log_flow(lead_id, f"Attempting to recover by reloading campaign", level="info")
+                await self.load_campaign()
+                
+                if self.campaign:
+                    self._log_flow(lead_id, f"Campaign reloaded successfully, retrying resume", level="info")
+                    # Try to resume again
+                    lead = await LeadModel.find_one(LeadModel.lead_id == lead_id, LeadModel.campaign_id == self.campaign_id)
+                    if lead and lead.status != "completed":
+                        await self._execute_flow_from_current_node(lead)
+                    else:
+                        self._log_flow(lead_id, f"Lead not found or already completed, skipping retry", level="warning")
+                else:
+                    self._log_flow(lead_id, f"Failed to reload campaign, cannot recover", level="error")
+            except Exception as recovery_error:
+                self._log_flow(lead_id, f"Recovery attempt failed: {str(recovery_error)}", level="error")
+            
             if 'lead' in locals() and lead:
                 await self._update_lead_status(lead, "failed", f"Resume failed: {str(e)}")
 
     async def resume_lead_from_condition(self, lead_id: str, condition_node_id: str, condition_met: bool):
         """Resume lead execution from a specific condition node when event occurs - interrupts NO branch"""
+        logger.info(f"[FLOW] === RESUME_LEAD_FROM_CONDITION STARTED ===")
+        logger.info(f"[FLOW] Parameters: lead_id='{lead_id}', condition_node_id='{condition_node_id}', condition_met={condition_met}")
+        logger.info(f"[FLOW] Campaign ID: '{self.campaign_id}'")
+        
         try:
+            logger.info(f"[FLOW] Step 1: Importing EventTracker")
             from app.services.event_tracker import EventTracker
+            logger.info(f"[FLOW] Step 2: Import successful")
             
+            logger.info(f"[FLOW] Step 3: Logging initial parameters")
             logger.info(f"=== RESUMING LEAD FROM CONDITION ===")
-            logger.info(f"Lead ID: {lead_id}")
-            logger.info(f"Condition Node ID: {condition_node_id}")
+            logger.info(f"Lead ID: '{lead_id}'")
+            logger.info(f"Condition Node ID: '{condition_node_id}'")
             logger.info(f"Condition Met: {condition_met}")
-            logger.info(f"Campaign ID: {self.campaign_id}")
+            logger.info(f"Campaign ID: '{self.campaign_id}'")
             
+            logger.info(f"[FLOW] Step 4: Setting up execution lock to prevent duplicates")
             # ✅ DEBUG: Add execution lock to prevent duplicate processing
             execution_key = f"{lead_id}_{condition_node_id}"
-            if execution_key in self._execution_locks:
-                logger.warning(f"[DUPLICATE_PREVENTION] Execution already in progress for {execution_key}, skipping")
-                return
+            logger.info(f"[FLOW] Execution key: {execution_key}")
             
-            self._execution_locks.add(execution_key)
-            logger.info(f"[DUPLICATE_PREVENTION] Added execution lock: {execution_key}")
-            
-            self._log_flow(lead_id, f"Resume from condition {condition_node_id} started - event occurred", level="info")
-            
-            await self.load_campaign()
-            lead = await LeadModel.find_one({"lead_id": lead_id, "campaign_id": self.campaign_id})
-
-            if not lead:
-                self._log_flow(lead_id, "Lead not found", level="error")
-                self._execution_locks.discard(execution_key)
-                return
-
-            # ✅ DEBUG: Add additional check to prevent race conditions
-            # Check if the lead is already at the condition node (meaning it's being processed)
-            if lead.current_node == condition_node_id:
-                logger.warning(f"[DUPLICATE_PREVENTION] Lead {lead_id} is already at condition node {condition_node_id}, skipping")
-                self._execution_locks.discard(execution_key)
-                return
-
-            if lead.status in ["completed", "failed"]:
-                self._log_flow(lead_id, f"Lead already {lead.status}, skipping resume", level="info")
-                return
-
-            # Validate condition node exists
-            condition_node = self.nodes.get(condition_node_id)
-            if not condition_node or condition_node.get("type") != "condition":
-                self._log_flow(lead_id, f"Condition node {condition_node_id} not found or invalid", level="error")
-                return
-
-            # ✅ CRITICAL FIX: Add execution lock to prevent duplicates
-            execution_key = f"executing_{lead_id}_{condition_node_id}"
             if hasattr(self, '_execution_locks'):
                 if execution_key in self._execution_locks:
-                    self._log_flow(lead_id, f"Already executing for this lead/condition, skipping duplicate", level="warning")
+                    logger.warning(f"[FLOW] DUPLICATE_PREVENTION: Execution already in progress for {execution_key}, skipping")
+                    logger.warning(f"[FLOW] === RESUME_LEAD_FROM_CONDITION ENDED WITH DUPLICATE PREVENTION ===")
                     return
             else:
                 self._execution_locks = set()
+                logger.info(f"[FLOW] Created new execution locks set")
             
             self._execution_locks.add(execution_key)
+            logger.info(f"[FLOW] Added execution lock: {execution_key}")
             
+            logger.info(f"[FLOW] Step 5: Logging flow start")
+            self._log_flow(lead_id, f"Resume from condition {condition_node_id} started - event occurred", level="info")
+            
+            logger.info(f"[FLOW] Step 6: Loading campaign")
+            await self.load_campaign()
+            logger.info(f"[FLOW] Campaign loaded successfully")
+            
+            logger.info(f"[FLOW] Step 7: Finding lead in database")
+            lead = await LeadModel.find_one(LeadModel.lead_id == lead_id, LeadModel.campaign_id == self.campaign_id)
+            logger.info(f"[FLOW] Lead query completed")
+
+            if not lead:
+                logger.error(f"[FLOW] ERROR: Lead {lead_id} not found")
+                self._log_flow(lead_id, "Lead not found", level="error")
+                self._execution_locks.discard(execution_key)
+                logger.error(f"[FLOW] === RESUME_LEAD_FROM_CONDITION ENDED WITH LEAD NOT FOUND ===")
+                return
+
+            logger.info(f"[FLOW] Step 8: Checking lead status and current node")
+            logger.info(f"[FLOW] Lead status: '{lead.status}', current_node: '{lead.current_node}'")
+            logger.info(f"[FLOW] Lead ID: '{lead.lead_id}', Campaign ID: '{lead.campaign_id}'")
+            
+            # Note: We removed the check for lead.current_node == condition_node_id 
+            # because when an event occurs, the lead IS at the condition node and needs to proceed to YES branch
+
+            if lead.status in ["completed", "failed"]:
+                logger.warning(f"[FLOW] Lead already '{lead.status}', skipping resume")
+                self._log_flow(lead_id, f"Lead already {lead.status}, skipping resume", level="info")
+                self._execution_locks.discard(execution_key)
+                logger.warning(f"[FLOW] === RESUME_LEAD_FROM_CONDITION ENDED WITH LEAD ALREADY COMPLETED ===")
+                return
+
+            logger.info(f"[FLOW] Step 9: Validating condition node exists")
+            # Validate condition node exists
+            condition_node = self.nodes.get(condition_node_id)
+            logger.info(f"[FLOW] Condition node found: {condition_node is not None}")
+            if condition_node:
+                logger.info(f"[FLOW] Condition node type: '{condition_node.get('type', 'unknown')}'")
+                logger.info(f"[FLOW] Condition node data: {condition_node}")
+            else:
+                logger.error(f"[FLOW] Condition node '{condition_node_id}' not found in self.nodes")
+                logger.error(f"[FLOW] Available nodes: {list(self.nodes.keys())}")
+            
+            if not condition_node or condition_node.get("type") != "condition":
+                logger.error(f"[FLOW] ERROR: Condition node '{condition_node_id}' not found or invalid")
+                self._log_flow(lead_id, f"Condition node {condition_node_id} not found or invalid", level="error")
+                self._execution_locks.discard(execution_key)
+                logger.error(f"[FLOW] === RESUME_LEAD_FROM_CONDITION ENDED WITH INVALID CONDITION NODE ===")
+                return
+            
+            logger.info(f"[FLOW] Step 10: Starting event clearing and task cancellation")
             try:
+                logger.info(f"[FLOW] Step 10a: Clearing waiting events for this condition node")
                 # Clear waiting events for this condition node
                 event_tracker = EventTracker(self.campaign_id)
                 await event_tracker.clear_waiting_events(lead_id, condition_node_id)
+                logger.info(f"[FLOW] Waiting events cleared successfully")
 
+                logger.info(f"[FLOW] Step 10b: Checking for scheduled task to cancel")
                 # ✅ ENHANCED: Robust task revocation with verification
                 if lead.scheduled_task_id:
+                    logger.info(f"[FLOW] Found scheduled task ID: {lead.scheduled_task_id}")
                     try:
+                        logger.info(f"[FLOW] Step 10c: Importing celery app")
                         from app.celery_config import celery_app
+                        logger.info(f"[FLOW] Celery app imported successfully")
                         
+                        self._log_flow(lead_id, f"CRITICAL: Cancelling scheduled task {lead.scheduled_task_id} before branch switch", level="info")
+                        
+                        logger.info(f"[FLOW] Step 10d: Revoking task with verification")
                         # Revoke with verification
                         celery_app.control.revoke(lead.scheduled_task_id, terminate=True, reply=True)
+                        logger.info(f"[FLOW] Task revocation command sent")
                         
-                        # Wait for confirmation
-                        await asyncio.sleep(0.1)
+                        logger.info(f"[FLOW] Step 10e: Waiting for revocation confirmation")
+                        # Wait longer for confirmation
+                        await asyncio.sleep(0.5)
+                        logger.info(f"[FLOW] Wait completed")
                         
+                        logger.info(f"[FLOW] Step 10f: Verifying task cancellation")
                         # Verify task is actually cancelled
                         from celery.result import AsyncResult
                         result = AsyncResult(lead.scheduled_task_id, app=celery_app)
+                        logger.info(f"[FLOW] Task state after revocation: {result.state}")
                         
                         if result.state == 'REVOKED':
+                            logger.info(f"[FLOW] Task successfully revoked")
                             self._log_flow(lead_id, f"Task {lead.scheduled_task_id} successfully revoked", level="info")
                             lead.scheduled_task_id = None
                             await lead.save()
+                            logger.info(f"[FLOW] Task ID cleared from lead")
                         else:
+                            logger.warning(f"[FLOW] Task revocation uncertain, state: {result.state}")
                             self._log_flow(lead_id, f"Task {lead.scheduled_task_id} revocation uncertain, state: {result.state}", level="warning")
+                            # Force clear the task ID even if revocation uncertain
+                            lead.scheduled_task_id = None
+                            await lead.save()
+                            logger.info(f"[FLOW] Task ID force cleared from lead")
                             
                     except Exception as e:
+                        logger.error(f"[FLOW] ERROR: Failed to cancel scheduled task: {e}")
                         self._log_flow(lead_id, f"Failed to cancel scheduled task: {e}", level="warning")
-                        lead.scheduled_task_id = None
+                else:
+                    logger.info(f"[FLOW] No scheduled task ID found")
+                    self._log_flow(lead_id, f"No scheduled task to cancel", level="info")
 
-                # Clear pause state
-                lead.status = "running"
-                await lead.save()
+                # ✅ ATOMIC OPERATION: Clear pause state and prevent race conditions
+                self._log_flow(lead_id, f"Event occurred - starting atomic transition to YES branch", level="info")
                 
-                await self._update_lead_status(lead, "running", f"Event occurred - resuming from condition node {condition_node_id}")
+                # ✅ CRITICAL: Cancel any ongoing NO branch tasks first
+                if lead.scheduled_task_id:
+                    self._log_flow(lead_id, f"Cancelling NO branch task: {lead.scheduled_task_id}", level="info")
+                    # Task cancellation was already done above
+                    # Clear the task ID to prevent interference with new tasks
+                    lead.scheduled_task_id = None
+                    await lead.save()
+                    self._log_flow(lead_id, f"Cleared scheduled_task_id to prevent interference", level="info")
                 
-                # ✅ FIXED: When event occurs, switch original lead to YES path
-                if condition_met:
-                    yes_node_id = self._get_next_node_id(condition_node_id, "yes")
+                # ✅ ATOMIC: Update lead status and add execution lock
+                branch_switch_key = f"branch_switch_{lead_id}_{condition_node_id}"
+                if hasattr(self, '_branch_switches'):
+                    if branch_switch_key in self._branch_switches:
+                        self._log_flow(lead_id, f"Branch switch already in progress, skipping duplicate", level="warning")
+                        return
+                else:
+                    self._branch_switches = set()
+                
+                self._branch_switches.add(branch_switch_key)
+                
+                try:
+                    # ✅ ATOMIC: Pause lead and save state immediately
+                    lead.status = "paused"  # Pause during transition
+                    await lead.save()
+                    await asyncio.sleep(0.2)  # Ensure state is saved
                     
-                    self._log_flow(lead_id, f"Event occurred - switching to YES path", level="info")
-                    self._log_flow(lead_id, f"YES path: {yes_node_id}", level="info")
-                    
-                    # Switch the original lead to YES path (this is what user expects)
-                    if yes_node_id:
-                        self._log_flow(lead_id, f"Switching original lead to YES path: {yes_node_id}", level="info")
+                    # ✅ CORRECTED: When event occurs, move lead from NO branch to YES path
+                    if condition_met:
+                        yes_node_id = self._get_next_node_id(condition_node_id, "yes")
                         
-                        # Update the original lead to continue with YES path
+                        self._log_flow(lead_id, f"Event occurred - moving lead from NO branch to YES path", level="info")
+                        self._log_flow(lead_id, f"Lead was at: {lead.current_node} (in NO branch)", level="info")
+                        self._log_flow(lead_id, f"Moving to YES path: {yes_node_id}", level="info")
+                        
+                        # Move the lead from NO branch to YES path
+                        if yes_node_id:
+                            self._log_flow(lead_id, f"ATOMIC: Moving lead from NO branch to YES path: {yes_node_id}", level="info")
+                            await self._add_journal_entry(lead_id, f"Event occurred - moved from NO branch ({lead.current_node}) to YES branch ({yes_node_id})", node_id=condition_node_id)
+                            
+                                                    # ✅ ATOMIC: Update the lead to start YES path with proper synchronization
+                        # ✅ CRITICAL: Clear completed_tasks and completed_waits to prevent skipping nodes in YES branch
+                        self._log_flow(lead_id, f"=== LEAD STATE BEFORE SWITCHING TO YES ===", level="info")
+                        self._log_flow(lead_id, f"Current node: {lead.current_node}", level="info")
+                        self._log_flow(lead_id, f"Status: {lead.status}", level="info")
+                        self._log_flow(lead_id, f"Completed tasks: {lead.completed_tasks}", level="info")
+                        self._log_flow(lead_id, f"Completed waits: {lead.completed_waits}", level="info")
+                        self._log_flow(lead_id, f"Execution path: {lead.execution_path}", level="info")
+                        
+                        self._log_flow(lead_id, f"Clearing completed_tasks and completed_waits to prevent node skipping in YES branch", level="info")
                         lead.current_node = yes_node_id
-                        lead.execution_path.append(yes_node_id)
-                        await lead.save()
+                        lead.execution_path.append(f"SWITCHED_TO_YES:{yes_node_id}")
+                        lead.completed_tasks = []  # Clear completed tasks to prevent skipping nodes
+                        lead.completed_waits = []  # Clear completed waits to prevent skipping wait nodes
+                        lead.status = "running"  # Resume execution
                         
-                        # Execute the YES path with the original lead
-                        logger.info(f"=== EXECUTING YES PATH ===")
-                        logger.info(f"Lead ID: {lead_id}")
-                        logger.info(f"YES Node ID: {yes_node_id}")
+                        self._log_flow(lead_id, f"=== LEAD STATE AFTER SWITCHING TO YES ===", level="info")
+                        self._log_flow(lead_id, f"Current node: {lead.current_node}", level="info")
+                        self._log_flow(lead_id, f"Status: {lead.status}", level="info")
+                        self._log_flow(lead_id, f"Completed tasks: {lead.completed_tasks}", level="info")
+                        self._log_flow(lead_id, f"Completed waits: {lead.completed_waits}", level="info")
+                        self._log_flow(lead_id, f"Execution path: {lead.execution_path}", level="info")
+                        
+                        await lead.save()
+                        self._log_flow(lead_id, f"Lead saved to database with updated state", level="info")
+                            
+                        # ✅ CRITICAL: Add longer delay to ensure atomic state is established and pending tasks are cleared
+                        await asyncio.sleep(1.0)
+                            
+                        # ✅ RELOAD: Reload lead to ensure we have latest state
+                        lead = await LeadModel.find_one(LeadModel.lead_id == lead_id)
+                        self._log_flow(lead_id, f"=== LEAD STATE AFTER RELOAD FROM DATABASE ===", level="info")
+                        self._log_flow(lead_id, f"Current node: {lead.current_node}", level="info")
+                        self._log_flow(lead_id, f"Status: {lead.status}", level="info")
+                        self._log_flow(lead_id, f"Completed tasks: {lead.completed_tasks}", level="info")
+                        self._log_flow(lead_id, f"Completed waits: {lead.completed_waits}", level="info")
+                        self._log_flow(lead_id, f"Execution path: {lead.execution_path}", level="info")
+                            
+                        # ✅ CRITICAL: Execute the flow from the YES node
+                        # Use the global email protection to prevent duplicates
+                        self._log_flow(lead_id, f"DEBUG: About to execute flow from YES node: {yes_node_id}", level="info")
+                        logger.info(f"[FLOW] Step 20: Executing flow from YES node '{yes_node_id}'")
+                        logger.info(f"[FLOW] Lead current_node before execution: '{lead.current_node}'")
+                        logger.info(f"[FLOW] Lead status before execution: '{lead.status}'")
+                            
                         await self._execute_flow_from_current_node(lead)
-                        self._log_flow(lead_id, f"Original lead now executing YES path", level="info")
-                        logger.info(f"=== YES PATH EXECUTION COMPLETE ===")
+                            
+                        logger.info(f"[FLOW] Step 21: Flow execution completed")
+                        logger.info(f"[FLOW] Lead current_node after execution: '{lead.current_node}'")
+                        logger.info(f"[FLOW] Lead status after execution: '{lead.status}'")
+                        self._log_flow(lead_id, f"DEBUG: Flow execution from YES node completed", level="info")
+                            
+                        logger.info(f"[FLOW] === YES PATH EXECUTION COMPLETE ===")
                     else:
                         self._log_flow(lead_id, f"No YES path found for condition node", level="warning")
                         await self._update_lead_status(lead, "completed", "No YES path found")
+                
+                finally:
+                    # Always remove the branch switch lock
+                    self._branch_switches.discard(branch_switch_key)
+                    self._log_flow(lead_id, f"Released branch switch lock: {branch_switch_key}", level="debug")
             finally:
                 # Always remove the execution lock
                 self._execution_locks.discard(execution_key)
@@ -1299,13 +1609,8 @@ class FlowExecutor:
             self._log_flow(lead_id, f"Resume from condition failed: {str(e)}", level="error")
             if 'lead' in locals() and lead:
                 await self._update_lead_status(lead, "failed", f"Resume from condition failed: {str(e)}")
-
-            await self._check_campaign_completion()
             
-        except Exception as e:
-            self._log_flow(lead_id, f"Resume from condition failed: {str(e)}", level="error")
-            if 'lead' in locals() and lead:
-                await self._update_lead_status(lead, "failed", f"Resume from condition failed: {str(e)}")
+            await self._check_campaign_completion()
 
     async def _execute_parallel_path(self, lead: LeadModel, start_node_id: str, path_name: str):
         """Execute a parallel path starting from a specific node"""
@@ -1314,7 +1619,7 @@ class FlowExecutor:
             
             # Check if parallel lead already exists to prevent duplicates
             parallel_lead_id = f"{lead.lead_id}_{path_name.lower()}"
-            existing_parallel_lead = await LeadModel.find_one({"lead_id": parallel_lead_id})
+            existing_parallel_lead = await LeadModel.find_one(LeadModel.lead_id == parallel_lead_id)
             
             if existing_parallel_lead:
                 self._log_flow(lead.lead_id, f"Parallel {path_name} path already exists: {parallel_lead_id}", level="warning")

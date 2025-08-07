@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from app.db.init import init_db
 from app.api.campaign import router as campaign_router
 from app.api.tracking import router as tracking_router
+from fastapi import Request
+from fastapi.templating import Jinja2Templates
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +39,10 @@ async def lifespan(app: FastAPI):
     logger.info("=== APPLICATION SHUTDOWN COMPLETE ===")
 
 app = FastAPI(lifespan=lifespan)
+
+# Set up Jinja2 templates directory for the delightloop landing page
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), 'templates')
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 # Add CORS middleware
 # For development, allowing all origins is convenient.
@@ -111,6 +118,11 @@ async def health_check():
         },
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+
+@app.get("/delightloop", include_in_schema=False)
+def delightloop_landing(request: Request):
+    """Serve the Delight Loop landing page as a static HTML page from the backend."""
+    return templates.TemplateResponse("delightloop.html", {"request": request})
 
 # Include API routers
 app.include_router(campaign_router, prefix="/api", tags=["campaigns"])
