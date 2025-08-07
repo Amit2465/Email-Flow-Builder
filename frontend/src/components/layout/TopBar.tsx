@@ -105,7 +105,7 @@ export const TopBar: React.FC = () => {
     // Test backend connection first
     try {
       console.log('=== TOPBAR: Testing backend connection ===')
-      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || 'https://ce4bb4e597bb.ngrok-free.app'}`
+      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL || 'https://820043592a06.ngrok-free.app'}`
       console.log('Testing connection to:', apiUrl)
       
       const testResponse = await fetch(`${apiUrl}/test-cors`, {

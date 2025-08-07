@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task(name="app.tasks.send_email_task", acks_late=True, max_retries=3)
 def send_email_task(
-    lead_id: str, campaign_id: str, subject: str, body: str, recipient_email: str, node_id: str, links: list = None
+    lead_id: str, campaign_id: str, subject: str, body: str, recipient_email: str, node_id: str, links: list = None, add_tracking_link: bool = False
 ):
     from app.tasks import resume_lead_task  
     from app.db.init import init_db
@@ -36,6 +36,7 @@ def send_email_task(
                 lead_id=lead_id,
                 campaign_id=campaign_id,
                 links=links,
+                add_tracking_link=add_tracking_link,
             )
             logger.info(f"Successfully sent email for lead {lead_id}")
         except Exception as email_error:
@@ -44,6 +45,9 @@ def send_email_task(
             raise
 
         # ✅ CRITICAL: Shorter delay to ensure lead state is properly established
+        time.sleep(0.5)
+        
+                # ✅ CRITICAL: Shorter delay to ensure lead state is properly established
         time.sleep(0.5)
         
         # ✅ Trigger continuation of the flow
@@ -72,6 +76,35 @@ def resume_lead_task(lead_id: str, campaign_id: str):
         logger.info(f"Lead ID: {lead_id}")
         logger.info(f"Campaign ID: {campaign_id}")
         logger.info(f"Timestamp: {datetime.now(timezone.utc).isoformat()}")
+        
+        # ✅ CRITICAL FIX: Check if an event has already occurred before resuming
+        from app.models.lead_event import LeadEvent
+        from app.models.lead import LeadModel
+        
+        # Check for recent processed events (only if they occurred very recently)
+        recent_event = await LeadEvent.find_one({
+            "lead_id": lead_id,
+            "campaign_id": campaign_id,
+            "processed": True
+        }, sort=[("processed_at", -1)])
+        
+        if recent_event:
+            # Only skip if the event occurred in the last 10 seconds (very recent)
+            # This prevents skipping during normal campaign execution
+            from datetime import timedelta
+            event_age = datetime.now(timezone.utc) - recent_event.processed_at
+            if event_age < timedelta(seconds=10):
+                logger.info(f"Recent event occurred for lead {lead_id}, skipping resume_lead_task to prevent duplicates")
+                logger.info(f"Recent event: {recent_event.event_type} at {recent_event.processed_at} (age: {event_age})")
+                return
+            else:
+                logger.info(f"Event occurred but is old ({event_age}), allowing resume_lead_task to continue")
+        
+        # Check if lead is already being processed by condition task
+        lead = await LeadModel.find_one({"lead_id": lead_id, "campaign_id": campaign_id})
+        if lead and lead.status == "running":
+            logger.info(f"Lead {lead_id} is already running, skipping resume_lead_task")
+            return
         
         executor = FlowExecutor(campaign_id)
         # Call resume_lead for wait nodes and email nodes (condition_met is None)
@@ -123,6 +156,20 @@ def resume_condition_task(lead_id: str, campaign_id: str, condition_met: bool = 
             if recent_event:
                 logger.info(f"Found recent event for condition node: {recent_event.condition_node_id}")
                 await executor.load_campaign()
+                
+                # ✅ CRITICAL FIX: Cancel any pending resume_lead_task to prevent duplicates
+                from app.models.lead import LeadModel
+                lead = await LeadModel.find_one({"lead_id": lead_id, "campaign_id": campaign_id})
+                if lead and lead.scheduled_task_id:
+                    try:
+                        from app.celery_config import celery_app
+                        celery_app.control.revoke(lead.scheduled_task_id, terminate=True)
+                        logger.info(f"Cancelled pending resume_lead_task: {lead.scheduled_task_id}")
+                        lead.scheduled_task_id = None
+                        await lead.save()
+                    except Exception as e:
+                        logger.warning(f"Failed to cancel pending task: {e}")
+                
                 await executor.resume_lead_from_condition(
                     lead_id=lead_id, 
                     condition_node_id=recent_event.condition_node_id, 

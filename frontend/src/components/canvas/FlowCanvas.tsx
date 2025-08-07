@@ -118,6 +118,7 @@ const FlowCanvasInner: React.FC = () => {
 
   const onNodeClick = useCallback(
     (event: React.MouseEvent, node: any) => {
+      console.log("Node clicked:", node.id, node.type)
       setSelectedNode(node.id)
     },
     [setSelectedNode],

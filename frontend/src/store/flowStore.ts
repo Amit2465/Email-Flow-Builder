@@ -608,7 +608,7 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
       }
 
       // Use ngrok URL for API calls
-      const apiUrl = 'https://ce4bb4e597bb.ngrok-free.app/api/campaigns';
+      const apiUrl = 'https://820043592a06.ngrok-free.app/api/campaigns';
       
       const response = await fetch(apiUrl, {
         method: 'POST',

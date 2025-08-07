@@ -1,14 +1,15 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from app.models.lead import LeadModel
 from app.services.flow_executor import FlowExecutor
 from app.services.event_tracker import EventTracker
 import logging
-from fastapi.responses import Response, RedirectResponse
+from fastapi.responses import Response, RedirectResponse, HTMLResponse
 from app.celery_config import celery_app
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadTimeSignature
 import os
 from urllib.parse import unquote
 from typing import Optional
+from fastapi.templating import Jinja2Templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -24,6 +25,10 @@ TRACKING_PIXEL = (
     b'\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b'
 )
 
+# Set up Jinja2 templates directory
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), '../templates')
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
 @router.get("/track/test")
 async def test_tracking():
     """Simple test endpoint to verify tracking API is accessible"""
@@ -34,100 +39,91 @@ async def test_tracking():
     logger.info(f"=== END TRACKING TEST ===")
     return {"message": "Tracking test successful", "timestamp": timestamp}
 
+@router.get("/track/test-open")
+async def test_email_open_tracking():
+    """Test endpoint to manually trigger email open tracking"""
+    # Create a test token for debugging
+    test_token = serializer.dumps({"lead_id": "test_lead", "campaign_id": "test_campaign", "type": "open"})
+    tracking_url = f"{API_PUBLIC_URL}/api/track/open?token={test_token}"
+    return {
+        "message": "Test email open tracking",
+        "tracking_url": tracking_url,
+        "test_token": test_token
+    }
+
 @router.get("/track/open")
-async def track_email_open(token: str = Query(..., description="Signed tracking token")):
+async def track_email_open(
+    token: str = Query(..., description="Signed tracking token"),
+    redirect: Optional[str] = Query(None, description="Optional redirect after tracking")
+):
     """
     Tracks email opens via a signed token. Processes events for multiple condition nodes.
+    If 'redirect' is provided, redirects the user after tracking.
     """
     try:
         logger.info(f"[TRACKING] === EMAIL OPEN TRACKING REQUEST ===")
         logger.info(f"[TRACKING] Token: {token[:20]}...")
         logger.info(f"[TRACKING] Token: {token[:20]}...")
-        
         # Validate token parameter
         if not token or not token.strip():
             logger.warning("[TRACKING] Empty tracking token received")
+            if redirect:
+                return RedirectResponse(url=redirect, status_code=302)
             return Response(content=TRACKING_PIXEL, media_type="image/gif")
-        
         logger.info(f"[TRACKING] Processing email open tracking request")
-        
         # Deserialize the token to get lead and campaign IDs
         data = serializer.loads(token, max_age=2592000) 
         lead_id = data["lead_id"]
         campaign_id = data["campaign_id"]
-        
         logger.info(f"[TRACKING] Email open tracked for lead {lead_id} in campaign {campaign_id}")
         logger.info(f"[TRACKING] Token data: {data}")
-        
         # Verify the lead exists in the database
         from app.models.lead import LeadModel
         lead = await LeadModel.find_one({"lead_id": lead_id, "campaign_id": campaign_id})
         if not lead:
             logger.error(f"[TRACKING] Lead {lead_id} not found in campaign {campaign_id}")
+            if redirect:
+                return RedirectResponse(url=redirect, status_code=302)
             return Response(content=TRACKING_PIXEL, media_type="image/gif")
-        
         logger.info(f"[TRACKING] Lead found: {lead.lead_id}, status: {lead.status}, current_node: {lead.current_node}")
-        
     except SignatureExpired:
         logger.warning("[TRACKING] Expired tracking token received")
+        if redirect:
+            return RedirectResponse(url=redirect, status_code=302)
         return Response(content=TRACKING_PIXEL, media_type="image/gif")
     except BadTimeSignature:
         logger.warning("[TRACKING] Invalid tracking token received")
+        if redirect:
+            return RedirectResponse(url=redirect, status_code=302)
         return Response(content=TRACKING_PIXEL, media_type="image/gif")
     except Exception as e:
         logger.error(f"[TRACKING] Failed to decode tracking token: {e}", exc_info=True)
+        if redirect:
+            return RedirectResponse(url=redirect, status_code=302)
         return Response(content=TRACKING_PIXEL, media_type="image/gif")
 
     try:
         logger.info(f"[TRACKING] Processing email open event for lead {lead_id}")
-        
-        # ✅ ENHANCED: Process the email open event with retry logic
+        # ✅ OPTIMIZED: Fast event processing without blocking
         event_tracker = EventTracker(campaign_id)
-        logger.info(f"[TRACKING] Created EventTracker for campaign {campaign_id}")
-        
-        # Retry logic for event processing
-        max_retries = 3
-        retry_count = 0
-        condition_node_id = None
-        
-        while retry_count < max_retries:
+        import asyncio
+        async def process_open_event_async():
             try:
                 condition_node_id = await event_tracker.process_event(lead_id, "email_open")
-                logger.info(f"[TRACKING] Event processing result: condition_node_id = {condition_node_id}")
-                break
+                if condition_node_id:
+                    executor = FlowExecutor(campaign_id)
+                    await executor.load_campaign()
+                    await executor.resume_lead_from_condition(lead_id, condition_node_id, condition_met=True)
+                    logger.info(f"[TRACKING] Resumed lead {lead_id} from condition node {condition_node_id} after email open.")
             except Exception as e:
-                retry_count += 1
-                logger.error(f"[TRACKING] Event processing attempt {retry_count} failed: {e}")
-                if retry_count < max_retries:
-                    import asyncio
-                    await asyncio.sleep(0.5 * retry_count)  # Exponential backoff
-                else:
-                    logger.error(f"[TRACKING] All {max_retries} attempts failed for lead {lead_id}")
-        
-        if condition_node_id:
-            logger.info(f"[TRACKING] Found waiting condition node {condition_node_id} for lead {lead_id}")
-            
-            # ✅ ENHANCED: Resume the lead with proper error handling
-            try:
-                executor = FlowExecutor(campaign_id)
-                await executor.load_campaign()
-                await executor.resume_lead_from_condition(lead_id, condition_node_id, condition_met=True)
-                logger.info(f"[TRACKING] Resumed lead {lead_id} from condition node {condition_node_id} after email open.")
-            except Exception as resume_error:
-                logger.error(f"[TRACKING] Failed to resume lead {lead_id}: {resume_error}")
-                # Don't fail the tracking request - the event was still recorded
-        else:
-            logger.warning(f"[TRACKING] No waiting condition node found for lead {lead_id} email open event.")
-            logger.warning(f"[TRACKING] This could mean:")
-            logger.warning(f"[TRACKING] 1. The email was opened before reaching the condition node")
-            logger.warning(f"[TRACKING] 2. The condition node hasn't been reached yet")
-            logger.warning(f"[TRACKING] 3. The event was already processed")
-            logger.warning(f"[TRACKING] 4. There's an issue with the tracking setup")
-            
+                logger.error(f"[TRACKING] Async email open processing failed: {e}")
+        asyncio.create_task(process_open_event_async())
+        logger.info(f"[TRACKING] Email open tracked asynchronously for lead {lead_id}")
     except Exception as e:
         logger.error(f"[TRACKING] Error processing email open for lead {lead_id}: {e}", exc_info=True)
-    
     logger.info(f"[TRACKING] === EMAIL OPEN TRACKING COMPLETED ===")
+    if redirect:
+        return RedirectResponse(url=redirect, status_code=302)
     return Response(
         content=TRACKING_PIXEL,
         media_type="image/gif",
@@ -137,6 +133,19 @@ async def track_email_open(token: str = Query(..., description="Signed tracking 
             "Expires": "0"
         }
     )
+
+@router.get("/close-tab")
+async def close_tab():
+    html = '''
+    <html><body>
+    <script>
+      window.close();
+      setTimeout(function(){ window.location = "about:blank"; }, 500);
+    </script>
+    <p>You can close this tab.</p>
+    </body></html>
+    '''
+    return HTMLResponse(content=html)
 
 @router.get("/track/click")
 async def track_link_click(token: str = Query(..., description="Signed tracking token"), url: str = Query(..., description="Original URL")):
@@ -148,7 +157,7 @@ async def track_link_click(token: str = Query(..., description="Signed tracking 
         data = serializer.loads(token, max_age=2592000)
         lead_id = data["lead_id"]
         campaign_id = data["campaign_id"]
-        original_url = unquote(url)  # Decode URL
+        original_url = unquote(url).strip().lower()
         
         # ✅ ENHANCED: Add timestamp and request details for debugging
         import time
@@ -173,63 +182,53 @@ async def track_link_click(token: str = Query(..., description="Signed tracking 
         return RedirectResponse(url=url)
 
     try:
-        # ✅ ENHANCED: Process the link click event with retry logic
+        # ✅ OPTIMIZED: Fast event processing without blocking redirect
         event_tracker = EventTracker(campaign_id)
         
-        # Retry logic for event processing
-        max_retries = 3
-        retry_count = 0
-        condition_node_id = None
+        # Process event asynchronously without blocking the redirect
+        import asyncio
         
-        logger.info(f"=== PROCESSING LINK CLICK EVENT ===")
-        logger.info(f"Lead ID: {lead_id}")
-        logger.info(f"Event Type: link_click")
-        logger.info(f"Target URL: {original_url}")
-        
-        while retry_count < max_retries:
+        async def process_event_and_resume():
             try:
                 condition_node_id = await event_tracker.process_event(lead_id, "link_click", original_url)
-                logger.info(f"Event processing result: condition_node_id = {condition_node_id}")
-                break
+                if condition_node_id:
+                    # Resume lead asynchronously without blocking
+                    executor = FlowExecutor(campaign_id)
+                    await executor.load_campaign()
+                    await executor.resume_lead_from_condition(lead_id, condition_node_id, condition_met=True)
+                    logger.info(f"Resumed lead {lead_id} from condition node {condition_node_id} after link click.")
             except Exception as e:
-                retry_count += 1
-                logger.error(f"[TRACKING] Link click event processing attempt {retry_count} failed: {e}")
-                if retry_count < max_retries:
-                    import asyncio
-                    await asyncio.sleep(0.5 * retry_count)  # Exponential backoff
-                else:
-                    logger.error(f"[TRACKING] All {max_retries} attempts failed for lead {lead_id} link click")
+                logger.error(f"[TRACKING] Async event processing failed: {e}")
         
-        logger.info(f"=== EVENT PROCESSING COMPLETE ===")
-        logger.info(f"Condition node ID: {condition_node_id}")
+        # Start async processing without waiting
+        asyncio.create_task(process_event_and_resume())
         
-        if condition_node_id:
-            # ✅ ENHANCED: Get lead details for resume
-            try:
-                lead = await LeadModel.find_one({"lead_id": lead_id, "campaign_id": campaign_id})
-                if lead:
-                    logger.info(f"Found lead {lead_id} for resume after link click")
-            except Exception as lead_error:
-                logger.error(f"[TRACKING] Failed to find lead {lead_id}: {lead_error}")
-                # Continue with resume even if lead lookup fails
-            
-            # ✅ ENHANCED: Resume the lead with proper error handling
-            try:
-                executor = FlowExecutor(campaign_id)
-                await executor.load_campaign()
-                await executor.resume_lead_from_condition(lead_id, condition_node_id, condition_met=True)
-                logger.info(f"Resumed lead {lead_id} from condition node {condition_node_id} after link click.")
-            except Exception as resume_error:
-                logger.error(f"[TRACKING] Failed to resume lead {lead_id} after link click: {resume_error}")
-                # Don't fail the tracking request - the event was still recorded
-        else:
-            logger.info(f"No waiting condition node found for lead {lead_id} link click event.")
-            
+        logger.info(f"=== LINK CLICK TRACKED (ASYNC) ===")
+        logger.info(f"Lead ID: {lead_id}")
+        logger.info(f"Campaign ID: {campaign_id}")
+        logger.info(f"Target URL: {original_url}")
+        logger.info(f"Event processing started asynchronously")
     except Exception as e:
         logger.error(f"Error processing link click for lead {lead_id}: {e}", exc_info=True)
-    
-    # Always redirect to the original URL
-    return RedirectResponse(url=original_url)
+
+    # Redirect logic for special cases
+    if original_url in ["about:blank", "readmore"]:
+        logger.info("[TRACKING] Redirecting to Delight Loop landing page for special event")
+        return RedirectResponse(url="/api/delightloop", status_code=302)
+
+    # Otherwise, redirect to the original URL as before
+    logger.info(f"[TRACKING] Redirecting to original URL: {original_url}")
+    return RedirectResponse(
+        url=original_url,
+        status_code=301,  # Permanent redirect to avoid ngrok warning page
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Frame-Options": "DENY",
+            "X-Content-Type-Options": "nosniff"
+        }
+    )
 
 async def send_button_email(recipient_email: str, clicked_url: str, lead_id: str, campaign_id: str, condition_node_id: str):
     """Send an email with button added to existing email body when link click is detected"""
@@ -359,3 +358,8 @@ async def send_button_email(recipient_email: str, clicked_url: str, lead_id: str
         
     except Exception as e:
         logger.error(f"Failed to send button email to {recipient_email}: {e}", exc_info=True)
+
+@router.get("/delightloop", include_in_schema=False)
+def delightloop_landing(request: Request):
+    """Serve the Delight Loop landing page as a static HTML page from the backend."""
+    return templates.TemplateResponse("delightloop.html", {"request": request})

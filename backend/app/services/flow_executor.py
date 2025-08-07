@@ -20,6 +20,8 @@ class FlowExecutor:
         self.nodes: Dict[str, Dict] = {}
         self.connections: Dict[str, List[Dict]] = {}
         self.execution_id = str(uuid.uuid4())[:8]
+        self._execution_locks = set()  # Prevent duplicate execution
+        self._lock_timestamps = {}  # Track when locks were created
 
     def _log_flow(self, lead_id: str, message: str, level: str = "info", **kwargs):
         """Structured logging for flow execution"""
@@ -762,6 +764,19 @@ class FlowExecutor:
             email_links = config.get("links", [])
             valid_links = [link for link in email_links if link.get("text") and link.get("url")]
             
+            # Check if next node is a condition node that needs email tracking
+            next_node_id = self._get_next_node_id(node["id"])
+            add_tracking_link = False
+            
+            if next_node_id:
+                next_node = self.nodes.get(next_node_id)
+                if next_node and next_node.get("type") == "condition":
+                    condition_config = next_node.get("configuration", {})
+                    condition_type = condition_config.get("conditionType")
+                    if condition_type == "open":
+                        add_tracking_link = True
+                        self._log_flow(lead.lead_id, f"Email node {node['id']} followed by email tracking condition, adding tracking link", level="info")
+            
             # Dispatch email task
             task_params = {
                 "lead_id": lead.lead_id,
@@ -770,7 +785,8 @@ class FlowExecutor:
                 "body": body,
                 "recipient_email": lead.email,
                 "node_id": node["id"],
-                "links": valid_links
+                "links": valid_links,
+                "add_tracking_link": add_tracking_link
             }
             
             task = send_email_task.delay(**task_params)
@@ -873,6 +889,12 @@ class FlowExecutor:
         try:
             from app.services.event_tracker import EventTracker
             
+            # ✅ DEBUG: Check if this condition is already being processed by resume function
+            execution_key = f"{lead.lead_id}_{node['id']}"
+            if execution_key in self._execution_locks:
+                logger.warning(f"[DUPLICATE_PREVENTION] Condition {node['id']} is already being processed by resume function, skipping")
+                return {"status": "duplicate_prevented", "message": "Condition already being processed by resume function"}
+            
             config = node.get("configuration", {})
             condition_type = config.get("conditionType", "open")
             
@@ -909,28 +931,19 @@ class FlowExecutor:
             self._log_flow(lead.lead_id, f"Checking for existing event: type={condition_type}, existing={existing_event}", level="debug", node_id=node["id"])
             
             if existing_event:
-                # Event already happened, switch to YES path immediately
-                self._log_flow(lead.lead_id, f"Event already occurred, switching to YES path", level="info", node_id=node["id"])
-                await self._add_journal_entry(lead.lead_id, f"Condition met - switching to YES path", node_id=node["id"])
+                # Event already happened, but don't execute YES path here
+                # Let the resume_lead_from_condition handle it to avoid duplicates
+                self._log_flow(lead.lead_id, f"Event already occurred, but skipping execution to avoid duplicates", level="info", node_id=node["id"])
+                await self._add_journal_entry(lead.lead_id, f"Event already occurred - will be handled by resume function", node_id=node["id"])
                 
-                # ✅ FIXED: Switch original lead to YES path immediately
-                yes_node_id = self._get_next_node_id(node["id"], "yes")
-                if yes_node_id:
-                    self._log_flow(lead.lead_id, f"Switching to YES path immediately: {yes_node_id}", level="info", node_id=node["id"])
-                    
-                    # Update the original lead to continue with YES path
-                    lead.current_node = yes_node_id
-                    lead.execution_path.append(yes_node_id)
-                    await lead.save()
-                    
-                    # Execute the YES path with the original lead
-                    await self._execute_flow_from_current_node(lead)
-                    self._log_flow(lead.lead_id, f"Original lead now executing YES path", level="info")
-                else:
-                    self._log_flow(lead.lead_id, f"No YES path found for condition node", level="warning")
-                    await self._update_lead_status(lead, "completed", "No YES path found")
+                # ✅ DEBUG: Check if we're already executing this condition
+                execution_key = f"{lead.lead_id}_{node['id']}"
+                if execution_key in self._execution_locks:
+                    logger.warning(f"[DUPLICATE_PREVENTION] Condition execution already in progress for {execution_key}, skipping")
+                    return {"status": "duplicate_prevented", "message": "Execution already in progress"}
                 
-                return {"status": "condition_met", "message": "Event already occurred, switched to YES path"}
+                # Just return success without executing YES path
+                return {"status": "event_exists", "message": "Event already occurred, will be handled by resume function"}
             
             # ✅ ENHANCED: Create waiting event with full email context
             # ✅ FIXED: Ensure correct event type based on condition type
@@ -1167,6 +1180,15 @@ class FlowExecutor:
             logger.info(f"Condition Met: {condition_met}")
             logger.info(f"Campaign ID: {self.campaign_id}")
             
+            # ✅ DEBUG: Add execution lock to prevent duplicate processing
+            execution_key = f"{lead_id}_{condition_node_id}"
+            if execution_key in self._execution_locks:
+                logger.warning(f"[DUPLICATE_PREVENTION] Execution already in progress for {execution_key}, skipping")
+                return
+            
+            self._execution_locks.add(execution_key)
+            logger.info(f"[DUPLICATE_PREVENTION] Added execution lock: {execution_key}")
+            
             self._log_flow(lead_id, f"Resume from condition {condition_node_id} started - event occurred", level="info")
             
             await self.load_campaign()
@@ -1174,6 +1196,14 @@ class FlowExecutor:
 
             if not lead:
                 self._log_flow(lead_id, "Lead not found", level="error")
+                self._execution_locks.discard(execution_key)
+                return
+
+            # ✅ DEBUG: Add additional check to prevent race conditions
+            # Check if the lead is already at the condition node (meaning it's being processed)
+            if lead.current_node == condition_node_id:
+                logger.warning(f"[DUPLICATE_PREVENTION] Lead {lead_id} is already at condition node {condition_node_id}, skipping")
+                self._execution_locks.discard(execution_key)
                 return
 
             if lead.status in ["completed", "failed"]:
@@ -1186,79 +1216,89 @@ class FlowExecutor:
                 self._log_flow(lead_id, f"Condition node {condition_node_id} not found or invalid", level="error")
                 return
 
-            # Clear waiting events for this condition node
-            event_tracker = EventTracker(self.campaign_id)
-            await event_tracker.clear_waiting_events(lead_id, condition_node_id)
-
-            # ✅ ENHANCED: Robust task revocation with verification
-            if lead.scheduled_task_id:
-                try:
-                    from app.celery_config import celery_app
-                    
-                    # Revoke with verification
-                    celery_app.control.revoke(lead.scheduled_task_id, terminate=True, reply=True)
-                    
-                    # Wait for confirmation
-                    await asyncio.sleep(0.1)
-                    
-                    # Verify task is actually cancelled
-                    from celery.result import AsyncResult
-                    result = AsyncResult(lead.scheduled_task_id, app=celery_app)
-                    
-                    if result.state == 'REVOKED':
-                        self._log_flow(lead_id, f"Task {lead.scheduled_task_id} successfully revoked", level="info")
-                        lead.scheduled_task_id = None
-                        await lead.save()
-                    else:
-                        self._log_flow(lead_id, f"Task {lead.scheduled_task_id} revocation uncertain, state: {result.state}", level="warning")
-                        
-                except Exception as e:
-                    self._log_flow(lead_id, f"Failed to cancel scheduled task: {e}", level="warning")
-                    lead.scheduled_task_id = None
-
-            # Clear pause state
-            lead.status = "running"
-            await lead.save()
-            
-            await self._update_lead_status(lead, "running", f"Event occurred - resuming from condition node {condition_node_id}")
-            
-            # ✅ FIXED: When event occurs, switch original lead to YES path
-            if condition_met:
-                yes_node_id = self._get_next_node_id(condition_node_id, "yes")
-                
-                self._log_flow(lead_id, f"Event occurred - switching to YES path", level="info")
-                self._log_flow(lead_id, f"YES path: {yes_node_id}", level="info")
-                
-                # Switch the original lead to YES path (this is what user expects)
-                if yes_node_id:
-                    self._log_flow(lead_id, f"Switching original lead to YES path: {yes_node_id}", level="info")
-                    
-                    # Update the original lead to continue with YES path
-                    lead.current_node = yes_node_id
-                    lead.execution_path.append(yes_node_id)
-                    await lead.save()
-                    
-                    # Execute the YES path with the original lead
-                    logger.info(f"=== EXECUTING YES PATH ===")
-                    logger.info(f"Lead ID: {lead_id}")
-                    logger.info(f"YES Node ID: {yes_node_id}")
-                    await self._execute_flow_from_current_node(lead)
-                    self._log_flow(lead_id, f"Original lead now executing YES path", level="info")
-                    logger.info(f"=== YES PATH EXECUTION COMPLETE ===")
-                else:
-                    self._log_flow(lead_id, f"No YES path found for condition node", level="warning")
-                    await self._update_lead_status(lead, "completed", "No YES path found")
+            # ✅ CRITICAL FIX: Add execution lock to prevent duplicates
+            execution_key = f"executing_{lead_id}_{condition_node_id}"
+            if hasattr(self, '_execution_locks'):
+                if execution_key in self._execution_locks:
+                    self._log_flow(lead_id, f"Already executing for this lead/condition, skipping duplicate", level="warning")
+                    return
             else:
-                # This shouldn't happen in normal flow, but handle gracefully
-                self._log_flow(lead_id, f"Condition not met but event occurred - this is unexpected", level="warning")
-                next_node_id = self._get_next_node_id(condition_node_id, "no")
+                self._execution_locks = set()
+            
+            self._execution_locks.add(execution_key)
+            
+            try:
+                # Clear waiting events for this condition node
+                event_tracker = EventTracker(self.campaign_id)
+                await event_tracker.clear_waiting_events(lead_id, condition_node_id)
+
+                # ✅ ENHANCED: Robust task revocation with verification
+                if lead.scheduled_task_id:
+                    try:
+                        from app.celery_config import celery_app
+                        
+                        # Revoke with verification
+                        celery_app.control.revoke(lead.scheduled_task_id, terminate=True, reply=True)
+                        
+                        # Wait for confirmation
+                        await asyncio.sleep(0.1)
+                        
+                        # Verify task is actually cancelled
+                        from celery.result import AsyncResult
+                        result = AsyncResult(lead.scheduled_task_id, app=celery_app)
+                        
+                        if result.state == 'REVOKED':
+                            self._log_flow(lead_id, f"Task {lead.scheduled_task_id} successfully revoked", level="info")
+                            lead.scheduled_task_id = None
+                            await lead.save()
+                        else:
+                            self._log_flow(lead_id, f"Task {lead.scheduled_task_id} revocation uncertain, state: {result.state}", level="warning")
+                            
+                    except Exception as e:
+                        self._log_flow(lead_id, f"Failed to cancel scheduled task: {e}", level="warning")
+                        lead.scheduled_task_id = None
+
+                # Clear pause state
+                lead.status = "running"
+                await lead.save()
                 
-                if next_node_id:
-                    lead.current_node = next_node_id
-                    await lead.save()
-                    await self._execute_flow_from_current_node(lead)
-                else:
-                    await self._update_lead_status(lead, "completed", "No next node for condition branch: no")
+                await self._update_lead_status(lead, "running", f"Event occurred - resuming from condition node {condition_node_id}")
+                
+                # ✅ FIXED: When event occurs, switch original lead to YES path
+                if condition_met:
+                    yes_node_id = self._get_next_node_id(condition_node_id, "yes")
+                    
+                    self._log_flow(lead_id, f"Event occurred - switching to YES path", level="info")
+                    self._log_flow(lead_id, f"YES path: {yes_node_id}", level="info")
+                    
+                    # Switch the original lead to YES path (this is what user expects)
+                    if yes_node_id:
+                        self._log_flow(lead_id, f"Switching original lead to YES path: {yes_node_id}", level="info")
+                        
+                        # Update the original lead to continue with YES path
+                        lead.current_node = yes_node_id
+                        lead.execution_path.append(yes_node_id)
+                        await lead.save()
+                        
+                        # Execute the YES path with the original lead
+                        logger.info(f"=== EXECUTING YES PATH ===")
+                        logger.info(f"Lead ID: {lead_id}")
+                        logger.info(f"YES Node ID: {yes_node_id}")
+                        await self._execute_flow_from_current_node(lead)
+                        self._log_flow(lead_id, f"Original lead now executing YES path", level="info")
+                        logger.info(f"=== YES PATH EXECUTION COMPLETE ===")
+                    else:
+                        self._log_flow(lead_id, f"No YES path found for condition node", level="warning")
+                        await self._update_lead_status(lead, "completed", "No YES path found")
+            finally:
+                # Always remove the execution lock
+                self._execution_locks.discard(execution_key)
+                logger.info(f"[DUPLICATE_PREVENTION] Removed execution lock: {execution_key}")
+                
+        except Exception as e:
+            self._log_flow(lead_id, f"Resume from condition failed: {str(e)}", level="error")
+            if 'lead' in locals() and lead:
+                await self._update_lead_status(lead, "failed", f"Resume from condition failed: {str(e)}")
 
             await self._check_campaign_completion()
             

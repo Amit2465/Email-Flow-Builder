@@ -38,6 +38,11 @@ export const PropertyPanel: React.FC = () => {
 
   const selectedNodeData = nodes.find((node) => node.id === selectedNode)
 
+  // Debug logging
+  console.log("Selected node:", selectedNode)
+  console.log("Selected node data:", selectedNodeData)
+  console.log("Node type:", selectedNodeData?.type)
+
   if (!selectedNode || !selectedNodeData || !selectedNodeData.data) return null
 
   const handleClose = () => {
@@ -419,16 +424,20 @@ export const PropertyPanel: React.FC = () => {
               <label className="block text-sm font-medium text-gray-700 mb-2">Condition Type</label>
               <select
                 value={selectedNodeData.data?.config?.conditionType || "open"}
-                onChange={(e) =>
+                onChange={(e) => {
+                  console.log("Condition type changed to:", e.target.value)
                   updateNode(selectedNode, {
                     config: { ...selectedNodeData.data?.config, conditionType: e.target.value },
                   })
-                }
+                }}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-purple-500"
               >
                 <option value="open">Email Opened</option>
                 <option value="click">Link Clicked</option>
               </select>
+              <p className="text-xs text-gray-500 mt-1">
+                Current value: {selectedNodeData.data?.config?.conditionType || "open"}
+              </p>
             </div>
             
             {/* Auto-detect email node and show status */}

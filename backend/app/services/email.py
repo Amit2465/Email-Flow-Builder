@@ -13,10 +13,10 @@ SECRET_KEY = "your-super-secret-key-that-is-hardcoded"
 # The public URL of the API, used for generating tracking links.
 # Using the ngrok URL provided by the user - supports both HTTP and HTTPS
 # ngrok automatically handles both HTTP and HTTPS requests to the same endpoint
-API_PUBLIC_URL = "https://ce4bb4e597bb.ngrok-free.app"
+API_PUBLIC_URL = "https://820043592a06.ngrok-free.app"
 
 # Fallback HTTP URL for compatibility (if HTTPS fails)
-API_PUBLIC_URL_HTTP = "http://ce4bb4e597bb.ngrok-free.app"
+API_PUBLIC_URL_HTTP = "http://820043592a06.ngrok-free.app"
 
 def get_tracking_url(endpoint: str, token: str, **params) -> str:
     """Generate tracking URL with protocol fallback support for ngrok"""
@@ -57,26 +57,25 @@ def convert_text_to_html(plain_text: str, links: list, click_token: str = None) 
             text = link.get("text", "").strip()
             url = link.get("url", "").strip()
             if text and url:
-                # Create tracking URL if token is provided
-                if click_token:
-                    tracking_url = get_tracking_url("/api/track/click", click_token, url=url)
-                else:
-                    tracking_url = url
+                # For configured buttons, always use the original URL
+                # This ensures buttons go directly to the chosen URL
+                tracking_url = url
                 
                 # Create a styled button for each link
                 button_html = f'''
-                <div style="margin: 20px 0;">
+                <div style="margin: 25px 0; text-align: center;">
                     <a href="{tracking_url}" style="
                         display: inline-block;
-                        background-color: #007bff;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                         color: white;
-                        padding: 12px 24px;
+                        padding: 15px 30px;
                         text-decoration: none;
-                        border-radius: 5px;
-                        font-weight: bold;
+                        border-radius: 25px;
+                        font-weight: 600;
                         font-size: 16px;
                         text-align: center;
-                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+                        transition: all 0.3s ease;
                     ">{text}</a>
                 </div>
                 '''
@@ -95,6 +94,7 @@ def send_email_with_tracking(
     lead_id: str,
     campaign_id: str,
     links: list = None,
+    add_tracking_link: bool = False,
 ):
     """
     Sends an HTML email with tracking pixel and link tracking.
@@ -161,6 +161,19 @@ def send_email_with_tracking(
                 logger.warning(f"[EMAIL] Empty URL found in email for lead {lead_id}")
                 return match.group(0)
             
+            # Skip tracking for certain URLs (like your own website)
+            skip_tracking_domains = [
+                '820043592a06.ngrok-free.app',  # Skip tracking for ngrok URLs
+                'localhost',
+                '127.0.0.1'
+            ]
+            
+            # Check if URL should skip tracking
+            for domain in skip_tracking_domains:
+                if domain in original_url:
+                    logger.debug(f"[EMAIL] Skipping tracking for domain {domain}: {original_url}")
+                    return match.group(0)  # Return original URL without tracking
+            
             # Create tracking URL with better security - supports both HTTP and HTTPS
             try:
                 tracking_url = get_tracking_url("/api/track/click", click_token, url=original_url)
@@ -187,6 +200,7 @@ def send_email_with_tracking(
     # Generate tracking pixel URL with protocol support
     tracking_pixel_url = get_tracking_url("/api/track/open", open_token)
     logger.info(f"[EMAIL] Generated tracking pixel URL: {tracking_pixel_url}")
+    logger.info(f"[EMAIL] Tracking pixel will be visible in email body")
     
     full_html_body = f"""
     <!DOCTYPE html>
@@ -196,27 +210,101 @@ def send_email_with_tracking(
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>{subject}</title>
         <style>
-            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-            .email-container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-            .header {{ background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
-            .content {{ padding: 20px; }}
-            .footer {{ background-color: #f8f9fa; padding: 15px; text-align: center; font-size: 12px; color: #666; margin-top: 20px; }}
+            body {{ 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                line-height: 1.6; 
+                color: #333; 
+                margin: 0; 
+                padding: 0; 
+                background-color: #f5f5f5;
+            }}
+            .email-container {{ 
+                max-width: 600px; 
+                margin: 0 auto; 
+                background-color: #ffffff; 
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            .header {{ 
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white; 
+                padding: 30px 20px; 
+                text-align: center;
+            }}
+            .content {{ 
+                padding: 40px 30px; 
+                background-color: #ffffff;
+            }}
+            .footer {{ 
+                background-color: #f8f9fa; 
+                padding: 20px; 
+                text-align: center; 
+                font-size: 12px; 
+                color: #666; 
+                border-top: 1px solid #e9ecef;
+            }}
+            .cta-button {{
+                display: inline-block;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 15px 30px;
+                text-decoration: none;
+                border-radius: 25px;
+                font-weight: 600;
+                font-size: 16px;
+                margin: 20px 0;
+                box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+                transition: all 0.3s ease;
+            }}
+            .cta-button:hover {{
+                transform: translateY(-2px);
+                box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+            }}
+            .tracking-link {{
+                display: inline;
+                color: #667eea;
+                text-decoration: underline;
+                font-weight: 400;
+                font-size: 14px;
+                margin-top: 20px;
+                transition: all 0.3s ease;
+            }}
+            .tracking-link:hover {{
+                color: #4a5568;
+                text-decoration: none;
+            }}
         </style>
+        <script>
+            // Auto-trigger tracking when email is opened (if JavaScript is enabled)
+            window.onload = function() {{
+                var img = new Image();
+                img.src = "{tracking_pixel_url}";
+            }};
+            
+
+        </script>
     </head>
     <body>
         <div class="email-container">
             <div class="header">
-                <h2 style="margin: 0; color: #007bff;">EmailBuilder Campaign</h2>
+                <h1 style="margin: 0; font-size: 28px; font-weight: 300;">Delightloop</h1>
+                <p style="margin: 10px 0 0 0; opacity: 0.9; font-size: 16px;">Professional Email Marketing</p>
             </div>
             <div class="content">
                 {tracked_body}
+                
+                {f'''<!-- Direct tracking link that closes tab after tracking -->
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="{get_tracking_url("/api/track/click", click_token, url="about:blank")}" class="tracking-link">Read more...</a>
+                </div>''' if add_tracking_link else ''}
             </div>
             <div class="footer">
-                <p>This email was sent by EmailBuilder. If you have any questions, please contact us.</p>
-                <p>© 2024 EmailBuilder. All rights reserved.</p>
+                <p style="margin: 0 0 10px 0;">© 2024 Delightloop. All rights reserved.</p>
+                <p style="margin: 0; font-size: 11px; color: #999;">
+                    <a href="mailto:unsubscribe@delightloop.com" style="color: #999; text-decoration: none;">Unsubscribe</a> | 
+                    <a href="mailto:privacy@delightloop.com" style="color: #999; text-decoration: none;">Privacy Policy</a>
+                </p>
             </div>
         </div>
-        <img src="{tracking_pixel_url}" width="1" height="1" style="display:none;" alt="" />
     </body>
     </html>
     """
@@ -224,10 +312,10 @@ def send_email_with_tracking(
     # Construct MIME message with proper headers
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = f"EmailBuilder <{SMTP_USERNAME}>"
+    msg["From"] = f"Delightloop <{SMTP_USERNAME}>"
     msg["To"] = recipient_email
     msg["Reply-To"] = SMTP_USERNAME
-    msg["X-Mailer"] = "EmailBuilder/1.0"
+    msg["X-Mailer"] = "Delightloop/1.0"
     msg["X-Priority"] = "3"
     msg["X-MSMail-Priority"] = "Normal"
     msg["Importance"] = "normal"
